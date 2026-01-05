@@ -1,0 +1,22 @@
+body {
+	font-family: sans-serif;
+}
+
+.homeTabs {
+	width: 100%;
+}
+
+.mainControlGrid {
+	display: grid;
+	grid-template-columns: 8rem 1fr;
+	padding: 1rem;
+}
+.controlPanelButton {
+	margin: 0.5rem;
+	width: 8.5rem;
+}
+
+.chart {
+	width: 97%;
+	margin-top: 3rem;
+}
