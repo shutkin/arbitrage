@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use log::{debug, info};
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::utils::handle_delta;
-use model::{Instrument, OrderBook, OrderData, OrderDataDelta};
+use model::{Instrument, OrderBook, OrderData, OrderDataDelta, Trade};
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres, Row};
@@ -147,19 +147,21 @@ impl Db {
 
     pub async fn get_instruments(&self, last_hour: bool) -> Result<Vec<Instrument>, CommonError> {
         let rows = sqlx::query(if last_hour {
-            "SELECT i.id, i.symbol, s.name, bc.name, qc.name FROM instrument i JOIN instrument_status s on i.status_code = s.code JOIN coin bc ON i.base_coin_code = bc.code JOIN coin qc ON i.quote_coin_code = qc.code WHERE i.id in (SELECT DISTINCT instrument_id FROM order_book WHERE created > now() - interval '1 hour');"
+            "SELECT i.id, i.ticker, i.name, i.external_id, s.name, bc.name, qc.name FROM instrument i JOIN instrument_status s on i.status_code = s.code LEFT JOIN coin bc ON i.base_coin_code = bc.code LEFT JOIN coin qc ON i.quote_coin_code = qc.code WHERE i.id in (SELECT DISTINCT instrument_id FROM order_book WHERE created > now() - interval '1 hour');"
         } else {
-            "SELECT i.id, i.symbol, s.name, bc.name, qc.name FROM instrument i JOIN instrument_status s on i.status_code = s.code JOIN coin bc ON i.base_coin_code = bc.code JOIN coin qc ON i.quote_coin_code = qc.code"
+            "SELECT i.id, i.ticker, i.name, i.external_id, s.name, bc.name, qc.name FROM instrument i JOIN instrument_status s on i.status_code = s.code LEFT JOIN coin bc ON i.base_coin_code = bc.code LEFT JOIN coin qc ON i.quote_coin_code = qc.code"
         })
             .fetch_all(&self.pool).await?;
         Ok(rows
             .iter()
             .map(|row| Instrument {
                 id: row.get(0),
-                symbol: row.get(1),
-                status: row.get(2),
-                base_coin: row.get(3),
-                quote_coin: row.get(4),
+                ticker: row.get(1),
+                name: row.get(1),
+                external_id: row.get(2),
+                status: row.get(3),
+                base_coin: row.get(4),
+                quote_coin: row.get(5),
             })
             .collect())
     }
@@ -174,10 +176,8 @@ impl Db {
         let mut coin_dictionary = DbDictionary::query(&self.pool, "coin").await?;
 
         for instrument in instruments {
-            if let Some(existing_instrument) = existing_instruments
-                .iter()
-                .find(|existing_instrument| existing_instrument.symbol == instrument.symbol)
-            {
+            if let Some(existing_instrument) = existing_instruments.iter()
+                .find(|existing_instrument| existing_instrument.ticker == instrument.ticker) {
                 instrument.id = existing_instrument.id;
                 continue;
             }
@@ -185,16 +185,24 @@ impl Db {
             let status_code = status_dictionary
                 .get_code(&self.pool, &instrument.status)
                 .await?;
-            let base_coin_code = coin_dictionary
-                .get_code(&self.pool, &instrument.base_coin)
-                .await?;
-            let quote_coin_code = coin_dictionary
-                .get_code(&self.pool, &instrument.quote_coin)
-                .await?;
+            let base_coin_code = if let Some(coin) = &instrument.base_coin {
+                let code = coin_dictionary.get_code(&self.pool, coin).await?;
+                Some(code)
+            } else {
+                None
+            };
+            let quote_coin_code = if let Some(coin) = &instrument.quote_coin {
+                let code = coin_dictionary.get_code(&self.pool, coin).await?;
+                Some(code)
+            } else {
+                None
+            };
 
             info!("Insert {:?}", instrument);
-            let id_row = sqlx::query("INSERT INTO instrument (symbol, status_code, base_coin_code, quote_coin_code) VALUES ($1, $2, $3, $4) RETURNING id")
-                .bind(instrument.symbol.clone())
+            let id_row = sqlx::query("INSERT INTO instrument (ticker, name, external_id, status_code, base_coin_code, quote_coin_code) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id")
+                .bind(instrument.ticker.clone())
+                .bind(instrument.name.clone())
+                .bind(instrument.external_id.clone())
                 .bind(status_code)
                 .bind(base_coin_code)
                 .bind(quote_coin_code)
@@ -363,7 +371,7 @@ impl Db {
     ) -> Result<i64, CommonError> {
         let instrument_id = instrument
             .id
-            .ok_or::<CommonError>(format!("Instrument {} has no id", instrument.symbol).into())?;
+            .ok_or::<CommonError>(format!("Instrument {} has no id", instrument.ticker).into())?;
         let res = sqlx::query(
             "INSERT INTO order_book (created, instrument_id) VALUES ($1, $2) RETURNING id",
         )
@@ -383,7 +391,7 @@ impl Db {
     ) -> Result<(), CommonError> {
         let instrument_id = instrument
             .id
-            .ok_or::<CommonError>(format!("Instrument {} has no id", instrument.symbol).into())?;
+            .ok_or::<CommonError>(format!("Instrument {} has no id", instrument.ticker).into())?;
 
         let ask_serialized = self.serialize_delta(ask_delta).await?;
         let bid_serialized = self.serialize_delta(bid_delta).await?;
@@ -431,6 +439,61 @@ impl Db {
             .bind(bids_sizes)
             .execute(&self.pool).await?;
 
+        Ok(())
+    }
+
+    pub async fn insert_trade(&self, trade: &Trade) -> EmptyResult {
+        let price_id = if let Some(price) = trade.price {
+            Some(self.prices.get_id(price, &self.pool).await?)
+        } else {
+            None
+        };
+        sqlx::query("INSERT INTO trade (created, instrument_id, price_id, quantity, direction) VALUES ($1, $2, $3, $4, $5)")
+            .bind(trade.created)
+            .bind(trade.instrument_id)
+            .bind(price_id)
+            .bind(trade.quantity)
+            .bind(trade.direction.map(|c| c.to_string()))
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn get_order_books_ids(&self, from: DateTime<Utc>, to: DateTime<Utc>, limit: i32)
+                                     -> Result<Vec<i64>, CommonError> {
+        let ids = sqlx::query("SELECT id FROM order_book WHERE created BETWEEN $1 AND $2 LIMIT $3")
+            .bind(from)
+            .bind(to)
+            .bind(limit)
+            .fetch_all(&self.pool).await?
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        Ok(ids)
+    }
+    
+    pub async fn get_order_books_time_diapason(&self, ids: &[i64]) -> Result<(DateTime<Utc>, DateTime<Utc>), CommonError> {
+        let row = sqlx::query("SELECT min(created), max(created) FROM order_book WHERE id IN (SELECT * FROM unnest($1))")
+            .bind(ids)
+            .fetch_one(&self.pool).await?;
+        Ok((row.get(0), row.get(1)))
+    }
+
+    pub async fn remove_order_books(&self, ids: &[i64], to: DateTime<Utc>) -> Result<(), CommonError> {
+        let res = sqlx::query("DELETE FROM order_book_ask WHERE order_book_id IN (SELECT * FROM unnest($1))")
+            .bind(ids)
+            .execute(&self.pool).await?;
+        info!("removed order books asks {}", res.rows_affected());
+
+        let res = sqlx::query("DELETE FROM order_book_bid WHERE order_book_id IN (SELECT * FROM unnest($1))")
+            .bind(ids)
+            .execute(&self.pool).await?;
+        info!("removed order books bids {}", res.rows_affected());
+
+        let res = sqlx::query("DELETE FROM order_book WHERE id IN (SELECT * FROM unnest($1)) AND created < $2")
+            .bind(ids)
+            .bind(to)
+            .execute(&self.pool).await?;
+        info!("removed order books {}", res.rows_affected());
         Ok(())
     }
 }

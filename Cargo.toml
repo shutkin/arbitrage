@@ -1,9 +1,12 @@
 [workspace]
 members = [
     "bybit",
-    "db", "experiment",
+    "cleaner",
+    "db",
+    "experiment",
     "listener",
     "model",
+    "tinvest",
     "viewer",
 ]
 resolver = "3"

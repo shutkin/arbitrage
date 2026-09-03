@@ -17,10 +17,10 @@ use bybit::rest_api::get_kline;
 use crate::pair_trader::{PairTrader, PairTraderConfig};
 use crate::perfect_trader::PerfectTrader;
 
-fn find_instrument_id(instruments: &[Instrument], symbol: &str) -> Option<i16> {
+fn find_instrument_id(instruments: &[Instrument], ticker: &str) -> Option<i16> {
     instruments
         .iter()
-        .find(|instrument| instrument.symbol == symbol)
+        .find(|instrument| instrument.ticker == ticker)
         .and_then(|instrument| instrument.id)
 }
 

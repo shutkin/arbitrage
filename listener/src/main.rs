@@ -1,18 +1,18 @@
-use bybit::BybitListener;
 use chrono::Utc;
 use db::Db;
 use log::{debug, error, info, warn};
+use model::common::EmptyResult;
 use model::events::{OrderBookDeltaEvent, OrderBookEvent};
 use model::utils::handle_delta;
-use model::{Instrument, OrderBook};
+use model::{Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicI64;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tinvest::TInvest;
 use tokio::sync::mpsc;
-use model::common::EmptyResult;
 
 const FULL_ORDER_BOOK_QUANT_MINUTES: i64 = 10;
 
@@ -25,6 +25,13 @@ struct ListenerHandler {
 }
 
 impl ListenerHandler {
+    async fn on_trade(&self, trade: &Trade) {
+        self.ticker.store(Utc::now().timestamp(), Relaxed);
+        if let Err(err) = self.db.insert_trade(trade).await {
+            error!("Failed to insert trade: {err}");
+        }
+    }
+
     async fn on_order_book(&self, event: OrderBookEvent) {
         self.ticker.store(Utc::now().timestamp(), Relaxed);
         if let Some(instrument) = self.instruments.get(&event.instrument_id) {
@@ -71,17 +78,35 @@ impl ListenerHandler {
 async fn main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
+
+    let token = std::env::var("T_INVEST_TOKEN").expect("T_INVEST_TOKEN is not set");
+    let t_invest = TInvest::new(&token).await?;
+
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
     let db = Db::new(&db_url).await?;
 
-    let mut instruments = bybit::rest_api::get_instrument_info().await?;
+    let mut instruments = t_invest.list_futures().await?;
     db.insert_instruments(&mut instruments).await?;
-    let symbols = ["BTCPERP", "BTCUSDT-26DEC25", "BTCUSDT-27MAR26", "BTCUSDT-25SEP26",
-        "ETHUSDT-26DEC25", "ETHUSDT-27MAR26", "ETHUSDT-26JUN26"].iter().map(ToString::to_string).collect::<Vec<_>>();
+    let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
     let mut instruments_map = HashMap::new();
     instruments.iter().for_each(|instrument| {
-        if symbols.contains(&instrument.symbol) && let Some(id) = instrument.id {
+        if tickers.contains(&instrument.ticker.as_str()) && let Some(id) = instrument.id {
             instruments_map.insert(id, instrument.clone());
+        }
+    });
+
+    let db_clone = db.clone();
+    let token_clone = token.clone();
+    let instruments_map_clone = instruments_map.clone();
+    tokio::spawn(async move {
+        let ticker = Arc::new(AtomicI64::new(0));
+        loop {
+            let now = Utc::now().timestamp();
+            if ticker.load(Relaxed) < now - 5 * 60 {
+                start_listener(db_clone.clone(), token_clone.clone(), instruments_map_clone.clone(), ticker.clone());
+                ticker.store(Utc::now().timestamp(), Relaxed);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 
@@ -89,14 +114,14 @@ async fn main() -> EmptyResult {
     loop {
         let now = Utc::now().timestamp();
         if ticker.load(Relaxed) < now - 5 * 60 {
-            start_listener(db.clone(), instruments_map.clone(), ticker.clone());
+            start_trade_listener(db.clone(), token.clone(), instruments_map.clone(), ticker.clone());
             ticker.store(Utc::now().timestamp(), Relaxed);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-fn start_listener(db: Db, instruments: HashMap<i16, Instrument>, ticker: Arc<AtomicI64>) {
+fn start_listener(db: Db, token: String, instruments: HashMap<i16, Instrument>, ticker: Arc<AtomicI64>) {
     let (order_book_sender,
         mut order_book_receiver) = mpsc::channel::<OrderBookEvent>(64);
     let (order_book_delta_sender,
@@ -105,7 +130,7 @@ fn start_listener(db: Db, instruments: HashMap<i16, Instrument>, ticker: Arc<Ato
         db: db.clone(),
         instruments: instruments.clone(),
         order_books: Arc::new(Mutex::new(HashMap::new())),
-        ticker
+        ticker: ticker.clone(),
     };
     let listener_handler_clone = listener_handler.clone();
     tokio::spawn(async move {
@@ -119,11 +144,69 @@ fn start_listener(db: Db, instruments: HashMap<i16, Instrument>, ticker: Arc<Ato
         }
     });
 
-    let listener = BybitListener::new(
-        &instruments.values().cloned().collect::<Vec<_>>(), order_book_sender, order_book_delta_sender);
+    let instruments_ids = instruments.values()
+        .filter_map(|instrument| {
+            if let Some(id) = instrument.id && let Some(external_id) = &instrument.external_id {
+                Some((external_id.clone(), id))
+            } else {
+                None
+            }
+        }).collect::<Vec<_>>();
     tokio::spawn(async move {
-        if let Err(err) = listener.start_listen().await {
-            error!("Listener error: {}", err);
+        match TInvest::new(&token).await {
+            Ok(t_invest) => {
+                info!("Start listen to order books: {instruments_ids:?}");
+                if let Err(err) = t_invest.listen(
+                    instruments_ids,
+                    order_book_sender,
+                    order_book_delta_sender,
+                ).await {
+                    error!("Listener error: {}", err);
+                }
+            },
+            Err(err) => {
+                error!("TInvest initialization error: {}", err);
+            }
+        }
+    });
+}
+
+fn start_trade_listener(db: Db, token: String, instruments: HashMap<i16, Instrument>, ticker: Arc<AtomicI64>) {
+    let instruments_ids = instruments.values()
+        .filter_map(|instrument| {
+            if let Some(id) = instrument.id && let Some(external_id) = &instrument.external_id {
+                Some((external_id.clone(), id))
+            } else {
+                None
+            }
+        }).collect::<Vec<_>>();
+
+    let (trade_sender, mut trade_receiver) = mpsc::channel::<Trade>(64);
+    let listener_handler = ListenerHandler {
+        db: db.clone(),
+        instruments: instruments.clone(),
+        order_books: Arc::new(Mutex::new(HashMap::new())),
+        ticker: ticker.clone(),
+    };
+    tokio::spawn(async move {
+        while let Some(trade) = trade_receiver.recv().await {
+            listener_handler.on_trade(&trade).await;
+        }
+    });
+    tokio::spawn(async move {
+        match TInvest::new(&token).await {
+            Ok(t_invest) => {
+                info!("Start listen to trades: {instruments_ids:?}");
+                if let Err(err) = t_invest.listen_trades(
+                    instruments_ids,
+                    trade_sender,
+                ).await {
+                    error!("Listener error: {}", err);
+                }
+            },
+            Err(err) => {
+                error!("TInvest initialization error: {}", err);
+            }
         }
     });
 }

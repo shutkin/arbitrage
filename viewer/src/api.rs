@@ -37,7 +37,7 @@ impl API {
         Ok(self.db.get_instruments(true).await?.iter()
             .map(|instrument| ClientInstrument {
                 id: instrument.id.unwrap_or_default(),
-                symbol: instrument.symbol.clone(),
+                symbol: instrument.ticker.clone(),
             }).collect())
     }
 
@@ -125,13 +125,13 @@ impl API {
         for instrument_id in &params.instrument_ids_asks {
             if let Some(instrument) = instruments.iter()
                 .find(|inst| inst.id == Some(*instrument_id)) {
-                result.push(format!("{} ask", instrument.symbol));
+                result.push(format!("{} ask", instrument.ticker));
             }
         }
         for instrument_id in &params.instrument_ids_bids {
             if let Some(instrument) = instruments.iter()
                 .find(|inst| inst.id == Some(*instrument_id)) {
-                result.push(format!("{} bid", instrument.symbol));
+                result.push(format!("{} bid", instrument.ticker));
             }
         }
         Ok(result)

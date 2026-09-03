@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug)]
 pub struct Instrument {
     pub id: Option<i16>,
-    pub symbol: String,
+    pub external_id: Option<String>,
+    pub name: String,
+    pub ticker: String,
     pub status: String,
-    pub base_coin: String,
-    pub quote_coin: String,
+    pub base_coin: Option<String>,
+    pub quote_coin: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,7 +25,7 @@ pub struct OrderBook {
     pub bids: Vec<OrderData>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct OrderData {
     pub price: Decimal,
     pub size: Decimal,
@@ -39,4 +41,14 @@ pub struct OrderDataDelta {
 pub struct OrderDataSlice {
     pub timestamp: DateTime<Utc>,
     pub order_data: Vec<OrderData>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Trade {
+    pub id: Option<i16>,
+    pub created: DateTime<Utc>,
+    pub instrument_id: i16,
+    pub price: Option<Decimal>,
+    pub quantity: Decimal,
+    pub direction: Option<char>,
 }

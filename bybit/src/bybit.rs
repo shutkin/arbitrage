@@ -76,7 +76,7 @@ impl BybitListener {
         let msg = serde_json::from_str::<BybitOrderBookMessage>(msg_text)?;
         if let Some(data) = msg.data {
             let instrument = self.instruments.iter()
-                .find(|instrument| instrument.symbol == data.s)
+                .find(|instrument| instrument.ticker == data.s)
                 .ok_or::<CommonError>(format!("Unknown instrument {}", data.s).into())?;
             let instrument_id = instrument.id.ok_or::<CommonError>(format!("Instrument {instrument:?} has no id").into())?;
             let timestamp = DateTime::from_timestamp_millis(msg.ts).unwrap_or(Utc::now());
@@ -117,7 +117,7 @@ impl BybitListener {
 
         let operation = BybitOperation {
             op: "subscribe".into(),
-            args: self.instruments.iter().map(|instrument| format!("orderbook.50.{}", instrument.symbol)).collect(),
+            args: self.instruments.iter().map(|instrument| format!("orderbook.50.{}", instrument.ticker)).collect(),
         };
         let json = serde_json::to_string(&operation)?;
 

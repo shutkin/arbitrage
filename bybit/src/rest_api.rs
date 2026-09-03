@@ -96,10 +96,12 @@ async fn handle_instruments_resp(result: &mut Vec<Instrument>, response: reqwest
         instruments.list.iter().for_each(|instrument| {
             result.push(Instrument {
                 id: None,
-                symbol: instrument.symbol.clone(),
+                ticker: instrument.symbol.clone(),
+                name: instrument.symbol.clone(),
                 status: instrument.status.clone(),
-                base_coin: instrument.base_coin.clone(),
-                quote_coin: instrument.quote_coin.clone(),
+                base_coin: Some(instrument.base_coin.clone()),
+                quote_coin: Some(instrument.quote_coin.clone()),
+                external_id: None,
             })
         });
         let cursor = if let Some(next_cursor) = &instruments.next_page_cursor {
