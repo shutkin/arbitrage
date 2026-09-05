@@ -2,7 +2,7 @@ use crate::OrderBookValues;
 use crate::signal_params::SignalParams;
 use chrono::{DateTime, TimeDelta, Utc};
 
-const COMMISSION_RATIO: f64 = 0.025 / 100.0;
+const COMMISSION_RATIO: f64 = 0.015 / 100.0;
 
 #[derive(Copy, Clone)]
 pub enum DealDirection {

@@ -46,8 +46,8 @@ async fn main() -> EmptyResult {
     let db = db::Db::new(&db_url).await?;
 
     let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
-    let start = DateTime::parse_from_rfc3339("2026-09-04T08:00:00Z")?.to_utc();
-    let finish = DateTime::parse_from_rfc3339("2026-09-04T19:00:00Z")?.to_utc();
+    let start = DateTime::parse_from_rfc3339("2026-09-03T13:00:00Z")?.to_utc();
+    let finish = DateTime::parse_from_rfc3339("2026-09-04T13:00:00Z")?.to_utc();
     let mut chunk_start = start - Duration::milliseconds(1);
 
     let all_instruments = db.get_instruments(false).await?;
@@ -93,8 +93,8 @@ async fn main() -> EmptyResult {
         all_values1.clear();
         all_values2.clear();
         let test_diapason = TimeDiapason::new(
-            DateTime::parse_from_rfc3339("2026-09-05T08:00:00Z")?.to_utc(),
-            DateTime::parse_from_rfc3339("2026-09-05T11:00:00Z")?.to_utc());
+            DateTime::parse_from_rfc3339("2026-09-04T13:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")?.to_utc());
         let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], test_diapason, Some(&db)).await?;
         let mut prev_index2 = 0;
         for order_book1 in &order_books1 {

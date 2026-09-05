@@ -7,7 +7,7 @@ use ndarray::Array1;
 
 pub const IMBALANCE_LEVELS: [usize; 4] = [3, 5, 10, 20];
 const DEFAULT_HOLD_MS: u16 = 300;
-const SOLVER_ITERATIONS: u64 = 16384;
+const SOLVER_ITERATIONS: u64 = 8192;
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct SignalParamsDir {
@@ -21,9 +21,9 @@ pub struct SignalParamsDir {
 impl SignalParamsDir {
     pub fn from_array(array: &Array1<f64>) -> Self {
         Self {
-            threshold: array[0],
-            derivative1_weight: array[1],
-            derivative2_weight: array[2],
+            threshold: array[0] * 10.0,
+            derivative1_weight: array[1] * 10.0,
+            derivative2_weight: array[2] * 10.0,
             imbalance1_weights: [array[3], array[4], array[5], array[6]],
             imbalance2_weights: [array[7], array[8], array[9], array[10]],
         }
@@ -78,25 +78,25 @@ impl CostFunction for TradingProblem<'_> {
                 down: Some(SignalParamsDir::from_array(p)),
             },
         };
-        let result = run_simulation(&self.values1, &self.values2, &params);
-        let profit = result.income - result.outcome;
+        let result = run_simulation(self.values1, self.values2, &params);
+        let profit = result.income - result.outcome - result.commission;
         Ok(-profit)
     }
 }
 
 pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]) -> SignalParams {
     let initial = Array1::from_vec(vec![
-        -3.0,  // A
-        1.0,  // B1
-        0.0,  // B2
-        0.0,  // C1
-        0.0,  // C2
-        0.0,  // C3
-        0.0,  // C4
-        0.0,  // C5
-        0.0,  // C6
-        0.0,  // C7
-        0.0,  // C8
+        -1.0,  // A
+        0.5,  // B1
+        -0.1,  // B2
+        0.1,  // C1
+        0.2,  // C2
+        0.1,  // C3
+        -0.1,  // C4
+        0.1,  // C5
+        0.2,  // C6
+        0.1,  // C7
+        -0.1,  // C8
     ]);
 
     let mut simplex = Vec::with_capacity(initial.len() + 1);
@@ -105,13 +105,7 @@ pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]
 
     for i in 0..initial.len() {
         let mut point = initial.clone();
-
-        point[i] += match i {
-            0 => 1.0,      // A
-            1 | 2 => 0.2,  // B1, B2
-            _ => 0.1,      // C1..C8
-        };
-
+        point[i] += 0.015;
         simplex.push(point);
     }
 
@@ -140,7 +134,7 @@ pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]
         values1,
         values2,
     };
-    info!("Start optimization UP");
+    info!("Start optimization DOWN");
     let params_down = match Executor::new(trade_problem, solver)
         .configure(|state| state.max_iters(SOLVER_ITERATIONS))
         .run() {
