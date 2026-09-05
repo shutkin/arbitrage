@@ -54,7 +54,7 @@ impl TInvest {
     ) -> EmptyResult {
         let mut uid_id_map = HashMap::with_capacity(instruments_id_uid.len());
         for (uid, id) in &instruments_id_uid {
-            uid_id_map.insert(uid.clone(), id.clone());
+            uid_id_map.insert(uid.clone(), *id);
         }
         let subs = instruments_id_uid.into_iter()
             .map(|(instrument_id, _)| {

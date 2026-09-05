@@ -6,11 +6,11 @@ edition = "2024"
 [dependencies]
 model = { path = "../model" }
 db = { path = "../db" }
-bybit = { path = "../bybit" }
 dotenv = "0.15"
 simplelog = "0.12"
 tokio = { version = "1.48", features = ["full"] }
 chrono = "0.4"
 log = "0.4"
-rust_decimal = "1.39"
 bincode = { version = "2.0", features = ["serde"] }
+argmin = { version = "0.11.0", features = ["_ndarrayl"] }
+ndarray = "0.16"
