@@ -1,12 +1,13 @@
-use crate::OrderBookValues;
+use crate::{OrderBookEvent, OrderBookValues};
 use crate::simulation::{DealDirection, run_simulation};
-use argmin::core::{CostFunction, Error, Executor};
+use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
-use log::info;
+use argmin::solver::particleswarm::ParticleSwarm;
+use log::{error, info, warn};
 use ndarray::Array1;
 
 pub const IMBALANCE_LEVELS: [usize; 4] = [3, 5, 10, 20];
-const DEFAULT_HOLD_MS: u16 = 300;
+const DEFAULT_HOLD_MS: u16 = 250;
 const SOLVER_ITERATIONS: u64 = 8192;
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -21,9 +22,9 @@ pub struct SignalParamsDir {
 impl SignalParamsDir {
     pub fn from_array(array: &Array1<f64>) -> Self {
         Self {
-            threshold: array[0] * 10.0,
-            derivative1_weight: array[1] * 10.0,
-            derivative2_weight: array[2] * 10.0,
+            threshold: array[0],
+            derivative1_weight: array[1].max(0.0),
+            derivative2_weight: array[2],
             imbalance1_weights: [array[3], array[4], array[5], array[6]],
             imbalance2_weights: [array[7], array[8], array[9], array[10]],
         }
@@ -37,28 +38,42 @@ pub struct SignalParams {
     pub down: Option<SignalParamsDir>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Signal {
+    None,
+    Buy1Sell2(f64),
+    Sell1Buy2(f64),
+}
+
 impl SignalParams {
-    pub fn calc_signal(&self, values1: &OrderBookValues, values2: &OrderBookValues) -> f64 {
+    pub fn calc_signal(&self, values1: &OrderBookValues, values2: &OrderBookValues) -> Signal {
         let params = if values1.std_derivative > 0.0 {&self.up} else {&self.down};
         if let Some(params) = params {
-            let mut result = params.threshold
+            let mut signal = params.threshold
                 + params.derivative1_weight * values1.std_derivative.abs()
                 + params.derivative2_weight * values2.std_derivative;
             for i in 0..IMBALANCE_LEVELS.len() {
-                result += params.imbalance1_weights[i] * values1.imbalances[i]
+                signal += params.imbalance1_weights[i] * values1.imbalances[i]
                     + params.imbalance2_weights[i] * values2.imbalances[i];
             }
-            result
+            if signal > 0.0 {
+                if values1.std_derivative < 0.0 {
+                    Signal::Buy1Sell2(signal)
+                } else {
+                    Signal::Sell1Buy2(signal)
+                }
+            } else {
+                Signal::None
+            }
         } else {
-            0.0
+            Signal::None
         }
     }
 }
 
 struct TradingProblem<'a> {
     direction: DealDirection,
-    values1: &'a [OrderBookValues],
-    values2: &'a [OrderBookValues],
+    events: &'a [OrderBookEvent],
 }
 
 impl CostFunction for TradingProblem<'_> {
@@ -66,37 +81,41 @@ impl CostFunction for TradingProblem<'_> {
     type Output = f64;
 
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+        let dir_params = SignalParamsDir::from_array(p);
+        if dir_params.derivative1_weight < 0.0 {
+            return Err(Error::msg("Negative derivative weight"));
+        }
         let params = match self.direction {
             DealDirection::Sell1Buy2 => SignalParams {
                 hold_ms: DEFAULT_HOLD_MS,
-                up: Some(SignalParamsDir::from_array(p)),
+                up: Some(dir_params),
                 down: None,
             },
             DealDirection::Buy1Sell2 => SignalParams {
                 hold_ms: DEFAULT_HOLD_MS,
                 up: None,
-                down: Some(SignalParamsDir::from_array(p)),
+                down: Some(dir_params),
             },
         };
-        let result = run_simulation(self.values1, self.values2, &params);
+        let result = run_simulation(self.events, &params, false, 0.0);
         let profit = result.income - result.outcome - result.commission;
         Ok(-profit)
     }
 }
 
-pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]) -> SignalParams {
+pub fn calibrate_params(events: &[OrderBookEvent]) -> SignalParams {
     let initial = Array1::from_vec(vec![
-        -1.0,  // A
-        0.5,  // B1
-        -0.1,  // B2
-        0.1,  // C1
-        0.2,  // C2
-        0.1,  // C3
-        -0.1,  // C4
-        0.1,  // C5
-        0.2,  // C6
-        0.1,  // C7
-        -0.1,  // C8
+        -3.0,  // A
+        1.0,  // B1
+        0.0,  // B2
+        0.0,  // C1
+        0.0,  // C2
+        0.0,  // C3
+        0.0,  // C4
+        0.0,  // C5
+        0.0,  // C6
+        0.0,  // C7
+        0.0,  // C8
     ]);
 
     let mut simplex = Vec::with_capacity(initial.len() + 1);
@@ -105,15 +124,20 @@ pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]
 
     for i in 0..initial.len() {
         let mut point = initial.clone();
-        point[i] += 0.015;
+
+        point[i] += match i {
+            0 => 1.0,      // A
+            1 | 2 => 0.2,  // B1, B2
+            _ => 0.1,      // C1..C8
+        };
+
         simplex.push(point);
     }
 
     let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
     let trade_problem = TradingProblem {
         direction: DealDirection::Sell1Buy2,
-        values1,
-        values2,
+        events,
     };
     info!("Start optimization UP");
     let params_up = match Executor::new(trade_problem, solver)
@@ -121,7 +145,7 @@ pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]
         .run() {
         Ok(result) => {
             let best_cost = result.state().get_best_cost();
-            let params = SignalParamsDir::from_array(&result.state().best_param.clone().unwrap_or_default());
+            let params = SignalParamsDir::from_array(result.state().get_best_param().unwrap());
             info!("Best UP profit {} with {params:?}", -best_cost);
             params
         },
@@ -131,8 +155,7 @@ pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]
     let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
     let trade_problem = TradingProblem {
         direction: DealDirection::Buy1Sell2,
-        values1,
-        values2,
+        events,
     };
     info!("Start optimization DOWN");
     let params_down = match Executor::new(trade_problem, solver)
@@ -140,7 +163,7 @@ pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]
         .run() {
         Ok(result) => {
             let best_cost = result.state().get_best_cost();
-            let params = SignalParamsDir::from_array(&result.state().best_param.clone().unwrap_or_default());
+            let params = SignalParamsDir::from_array(result.state().get_best_param().unwrap());
             info!("Best DOWN profit {} with {params:?}", -best_cost);
             params
         },
@@ -151,5 +174,70 @@ pub fn calibrate_params(values1: &[OrderBookValues], values2: &[OrderBookValues]
         hold_ms: DEFAULT_HOLD_MS,
         up: Some(params_up),
         down: Some(params_down),
+    }
+}
+
+pub fn _calibrate_params(events: &[OrderBookEvent]) -> SignalParams {
+    let bounds_down = Array1::from_vec(vec![-30.0, 0.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]);
+    let bounds_up = Array1::from_vec(vec![-5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+
+    let trade_problem = TradingProblem {
+        direction: DealDirection::Sell1Buy2,
+        events,
+    };
+    let solver = ParticleSwarm::<Array1<f64>, f64, _>::new((bounds_down.clone(), bounds_up.clone()), 64);
+    info!("Start optimization UP");
+    let params_up = match Executor::new(trade_problem, solver)
+        .configure(|state| state.max_iters(SOLVER_ITERATIONS))
+        .run() {
+        Ok(result) => {
+            if let Some(best_params) = result.state().get_best_param() {
+                //let best_cost = result.state().get_best_cost();
+                let best_cost = best_params.cost;
+                let params = SignalParamsDir::from_array(&best_params.position);
+                info!("Best UP profit {} with {params:?}", -best_cost);
+                Some(params)
+            } else {
+                warn!("No best up params found");
+                None
+            }
+        },
+        Err(e) => {
+            error!("{e}");
+            None
+        }
+    };
+
+    let trade_problem = TradingProblem {
+        direction: DealDirection::Buy1Sell2,
+        events,
+    };
+    let solver = ParticleSwarm::<Array1<f64>, f64, _>::new((bounds_down, bounds_up), 64);
+    info!("Start optimization DOWN");
+    let params_down = match Executor::new(trade_problem, solver)
+        .configure(|state| state.max_iters(SOLVER_ITERATIONS))
+        .run() {
+        Ok(result) => {
+            if let Some(best_params) = result.state().get_best_param() {
+                //let best_cost = result.state().get_best_cost();
+                let best_cost = best_params.cost;
+                let params = SignalParamsDir::from_array(&best_params.position);
+                info!("Best DOWN profit {} with {params:?}", -best_cost);
+                Some(params)
+            } else {
+                warn!("No best up params found");
+                None
+            }
+        },
+        Err(e) => {
+            error!("{e}");
+            None
+        }
+    };
+
+    SignalParams {
+        hold_ms: DEFAULT_HOLD_MS,
+        up: params_up,
+        down: params_down,
     }
 }
