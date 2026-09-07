@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, TimeDelta, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::info;
 use model::common::{CommonError, EmptyResult, TimeDiapason};
-use model::{Instrument, OrderBook};
+use model::{Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
 
 fn find_instrument_id(instruments: &[Instrument], ticker: &str) -> Option<i16> {
@@ -55,22 +55,48 @@ async fn main() -> EmptyResult {
             DateTime::parse_from_rfc3339("2026-09-04T10:00:00Z")?.to_utc(),
             DateTime::parse_from_rfc3339("2026-09-04T20:00:00Z")?.to_utc(),
         );
+        let trades1 = db.get_trades(inst1_id, test_diapason).await?;
+        let trades2 = db.get_trades(inst2_id, test_diapason).await?;
         let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], test_diapason, Some(&db)).await?;
-        let mut all_values1 = order_books1.iter().filter_map(calculate_values).collect::<Vec<_>>();
+        let mut values1 = order_books1.iter().filter_map(calculate_values).collect::<Vec<_>>();
         let mut all_values2 = order_books2.iter().filter_map(calculate_values).collect::<Vec<_>>();
         info!("Calculate std deviations");
-        calculate_std_deviations(&mut all_values1);
+        calculate_std_deviations(&mut values1);
         calculate_std_deviations(&mut all_values2);
 
-        let events = merge_events(&all_values1, &all_values2);
-        let params = SignalParams { hold_ms: 250, up: Some(SignalParamsDir { threshold: 0.15453738797718342, derivative1_weight: 1.1629761023166723, derivative2_weight: 0.32481462380662857, imbalance1_weights: [-0.09802006258516288, -0.04839597102546962, -0.0549509873464885, -0.15984030244392058], imbalance2_weights: [-0.06759615045675671, -0.049698124522988454, 0.061509796401540175, 0.06838655861917534] }), down: Some(SignalParamsDir { threshold: 0.12809776356042107, derivative1_weight: 1.2524761056539522, derivative2_weight: 1.0711123993550387, imbalance1_weights: [-0.08348685530090004, -0.19510914374521984, -0.22190776923813244, -0.004042762088653724], imbalance2_weights: [-0.05784155826200306, -0.01112889975677297, -0.06887535463793135, -0.12454322697759054] }) };
-        for threshold in [
+        info!(
+            "Merge {} values1, {} values2, {} deals1, {} deals2",
+            values1.len(), all_values2.len(), trades1.len(), trades2.len()
+        );
+        let events = merge_events(&values1, &all_values2, &trades1, &trades2);
+        info!("Total events: {}", events.len());
+        let mut params = SignalParams { hold_ms: 250, up: Some(SignalParamsDir { threshold: 0.15453738797718342, derivative1_weight: 1.1629761023166723, derivative2_weight: 0.32481462380662857, imbalance1_weights: [-0.09802006258516288, -0.04839597102546962, -0.0549509873464885, -0.15984030244392058], imbalance2_weights: [-0.06759615045675671, -0.049698124522988454, 0.061509796401540175, 0.06838655861917534] }), down: Some(SignalParamsDir { threshold: 0.12809776356042107, derivative1_weight: 1.2524761056539522, derivative2_weight: 1.0711123993550387, imbalance1_weights: [-0.08348685530090004, -0.19510914374521984, -0.22190776923813244, -0.004042762088653724], imbalance2_weights: [-0.05784155826200306, -0.01112889975677297, -0.06887535463793135, -0.12454322697759054] }) };
+
+        for signal_threshold in [
             0.0, 5.0, 10.0, 15.0, 20.0,
             25.0, 30.0, 35.0, 40.0, 50.0,
             75.0, 100.0, 125.0, 150.0
         ] {
-            let result = run_simulation(&events, &params, false, threshold);
-            println!("{threshold:.0} | {} | {:.1} | {:.1} | {:.1}",
+            let result = run_simulation(&events, &params, signal_threshold, 0, false);
+            println!("{signal_threshold} | {} | {:.1} | {:.1} | {:.1}",
+                     result.win + result.loss, result.income - result.outcome, result.commission,
+                     result.income - result.outcome - result.commission);
+        }
+        println!();
+
+        for hold_time in [50, 100, 250, 500, 1000, 2000] {
+            params.hold_ms = hold_time;
+            let result = run_simulation(&events, &params, 0.0, 0, false);
+            println!("{hold_time} | {} | {:.1} | {:.1} | {:.1}",
+                     result.win + result.loss, result.income - result.outcome, result.commission,
+                     result.income - result.outcome - result.commission);
+        }
+        println!();
+
+        params.hold_ms = 250;
+        for latency in [0, 10, 25, 50, 100] {
+            let result = run_simulation(&events, &params, 0.0, latency, false);
+            println!("{latency} | {} | {:.1} | {:.1} | {:.1}",
                      result.win + result.loss, result.income - result.outcome, result.commission,
                      result.income - result.outcome - result.commission);
         }
@@ -119,7 +145,7 @@ async fn _main() -> EmptyResult {
         calculate_std_deviations(&mut all_values2);
         //std::fs::write("results.csv", csv.join("\n"))?;
 
-        let params = calibrate_params(&merge_events(&all_values1, &all_values2));
+        let params = calibrate_params(&merge_events(&all_values1, &all_values2, &[], &[]));
         info!("{params:?}");
 
         all_values1.clear();
@@ -130,7 +156,7 @@ async fn _main() -> EmptyResult {
         calculate_std_deviations(&mut all_values1);
         calculate_std_deviations(&mut all_values2);
 
-        let events = merge_events(&all_values1, &all_values2);
+        let events = merge_events(&all_values1, &all_values2, &[], &[]);
         log_simulation(&events[0..10000], &params);
 
         /*
@@ -148,16 +174,67 @@ fn convert_values(order_books1: &[OrderBook], order_books2: &[OrderBook], all_va
     all_values2.extend(order_books2.iter().filter_map(calculate_values));
 }
 
-fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues]) -> Vec<OrderBookEvent> {
+fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues], trades1: &[Trade], trades2: &[Trade]) -> Vec<OrderBookEvent> {
     let mut events = Vec::with_capacity(values1.len() + values2.len());
-    let (mut index1, mut index2) = (0, 0);
-    while index1 < values1.len() && index2 < values2.len() {
-        if values1[index1].time <= values2[index2].time {
-            events.push(OrderBookEvent::Instrument1(values1[index1]));
-            index1 += 1;
+    let (mut v_index1, mut v_index2, mut t_index1, mut t_index2) = (0, 0, 0, 0);
+    while v_index1 < values1.len() || v_index2 < values2.len() || t_index1 < trades1.len() || t_index2 < trades2.len() {
+        let mut cur_event = None;
+        let mut cur_event_time = None;
+        
+        if let Some(v) = values1.get(v_index1) {
+            let event = OrderBookEvent::Instrument1(*v);
+            let use_it = if let Some(event_time) = cur_event_time {
+                v.time < event_time
+            } else { true };
+            if use_it {
+                cur_event_time = Some(v.time);
+                cur_event = Some(event);
+            }
+        }
+
+        if let Some(v) = values2.get(v_index2) {
+            let event = OrderBookEvent::Instrument2(*v);
+            let use_it = if let Some(event_time) = cur_event_time {
+                v.time < event_time
+            } else { true };
+            if use_it {
+                cur_event_time = Some(v.time);
+                cur_event = Some(event);
+            }
+        }
+
+        if let Some(t) = trades1.get(t_index1) {
+            let event = OrderBookEvent::Deal1(*t);
+            let use_it = if let Some(event_time) = cur_event_time {
+                t.created < event_time
+            } else { true };
+            if use_it {
+                cur_event_time = Some(t.created);
+                cur_event = Some(event);
+            }
+        }
+
+        if let Some(t) = trades2.get(t_index2) {
+            let event = OrderBookEvent::Deal2(*t);
+            let use_it = if let Some(event_time) = cur_event_time {
+                t.created < event_time
+            } else { true };
+            if use_it {
+                cur_event_time = Some(t.created);
+                cur_event = Some(event);
+            }
+        }
+        
+        if let Some(event) = cur_event {
+            match event {
+                OrderBookEvent::Instrument1(_) => v_index1 += 1,
+                OrderBookEvent::Instrument2(_) => v_index2 += 1,
+                OrderBookEvent::Deal1(_) => t_index1 += 1,
+                OrderBookEvent::Deal2(_) => t_index2 += 1,
+            }
+            events.push(event);
         } else {
-            events.push(OrderBookEvent::Instrument2(values2[index2]));
-            index2 += 1;
+            break;
         }
     }
     events
@@ -198,6 +275,8 @@ fn find_nearest_order_book(time: DateTime<Utc>, order_books: &[OrderBook], prev_
 enum OrderBookEvent {
     Instrument1(OrderBookValues),
     Instrument2(OrderBookValues),
+    Deal1(Trade),
+    Deal2(Trade),
 }
 
 #[derive(Copy, Clone, Debug)]

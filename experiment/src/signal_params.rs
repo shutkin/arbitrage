@@ -97,7 +97,7 @@ impl CostFunction for TradingProblem<'_> {
                 down: Some(dir_params),
             },
         };
-        let result = run_simulation(self.events, &params, false, 0.0);
+        let result = run_simulation(self.events, &params, 0.0, 0, false);
         let profit = result.income - result.outcome - result.commission;
         Ok(-profit)
     }

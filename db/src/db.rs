@@ -457,6 +457,23 @@ impl Db {
             .execute(&self.pool).await?;
         Ok(())
     }
+    
+    pub async fn get_trades(&self, instrument_id: i16, diapason: TimeDiapason) -> Result<Vec<Trade>, CommonError> {
+        Ok(sqlx::query("SELECT t.id, t.created, p.price, t.quantity, t.direction FROM trade t LEFT JOIN price p ON t.price_id = p.id WHERE instrument_id = $1 AND created BETWEEN $2 AND $3 ORDER BY t.created")
+            .bind(instrument_id)
+            .bind(diapason.from)
+            .bind(diapason.to)
+            .fetch_all(&self.pool).await?
+            .into_iter()
+            .map(|row| Trade {
+                id: Some(row.get(0)),
+                instrument_id,
+                created: row.get(1),
+                price: row.get(2),
+                quantity: row.get(3),
+                direction: row.get::<Option<String>, _>(4).map(|str| str.chars().next().unwrap()),
+            }).collect())
+    }
 
     pub async fn get_order_books_ids(&self, from: DateTime<Utc>, to: DateTime<Utc>, limit: i32)
                                      -> Result<Vec<i64>, CommonError> {

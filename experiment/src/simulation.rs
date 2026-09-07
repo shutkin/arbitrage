@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use crate::signal_params::{Signal, SignalParams};
 use crate::{OrderBookEvent, OrderBookValues};
 use chrono::{DateTime, TimeDelta, Utc};
+use model::Trade;
 
 const COMMISSION_RATIO: f64 = 0.015 / 100.0;
 
@@ -20,21 +21,19 @@ pub enum DealDirection {
 
 #[derive(Copy, Clone)]
 pub struct Deal {
-    price_time1: DateTime<Utc>,
-    price_time2: DateTime<Utc>,
-    open_time: DateTime<Utc>,
     direction: DealDirection,
+    open_time: DateTime<Utc>,
     entry_price1: f64,
     entry_price2: f64,
-    close_values1: Option<OrderBookValues>,
-    close_values2: Option<OrderBookValues>,
+    close_price1: Option<f64>,
+    close_price2: Option<f64>,
+    close_time1: Option<DateTime<Utc>>,
+    close_time2: Option<DateTime<Utc>>,
 }
 
 impl Deal {
     fn sell1_buy2(v1: OrderBookValues, v2: OrderBookValues) -> Self {
         Self {
-            price_time1: v1.time,
-            price_time2: v2.time,
             open_time: v1.time.max(v2.time),
             direction: DealDirection::Sell1Buy2,
 
@@ -44,15 +43,15 @@ impl Deal {
             // Buy GLZ6 -> ask
             entry_price2: v2.ask,
 
-            close_values1: None,
-            close_values2: None,
+            close_price1: None,
+            close_price2: None,
+            close_time1: None,
+            close_time2: None,
         }
     }
 
     fn buy1_sell2(v1: OrderBookValues, v2: OrderBookValues) -> Self {
         Self {
-            price_time1: v1.time,
-            price_time2: v2.time,
             open_time: v1.time.max(v2.time),
             direction: DealDirection::Buy1Sell2,
 
@@ -62,60 +61,65 @@ impl Deal {
             // Sell GLZ6 -> bid
             entry_price2: v2.bid,
 
-            close_values1: None,
-            close_values2: None,
+            close_price1: None,
+            close_price2: None,
+            close_time1: None,
+            close_time2: None,
         }
     }
 
-    fn close_instrument1(&mut self, values: OrderBookValues) {
-        if self.close_values1.is_none() {
-            self.close_values1 = Some(values);
+    fn close_instrument1(&mut self, price: f64, time: DateTime<Utc>) {
+        if self.close_price1.is_none() {
+            self.close_price1 = Some(price);
+            self.close_time1 = Some(time);
         }
     }
 
-    fn close_instrument2(&mut self, values: OrderBookValues) {
-        if self.close_values2.is_none() {
-            self.close_values2 = Some(values);
+    fn close_instrument2(&mut self, price: f64, time: DateTime<Utc>) {
+        if self.close_price2.is_none() {
+            self.close_price2 = Some(price);
+            self.close_time2 = Some(time);
         }
     }
 
     fn is_completed(&self) -> bool {
-        self.close_values1.is_some() && self.close_values2.is_some()
+        self.close_price1.is_some() && self.close_price2.is_some()
     }
 
     fn close(&self, log: bool) -> (DateTime<Utc>, f64, f64) {
-        if let Some(v1) = self.close_values1 && let Some (v2) = self.close_values2 {
+        if let Some(p1) = self.close_price1 && let Some (p2) = self.close_price2 &&
+            let Some(close_time1) = self.close_time1 && let Some(close_time2) = self.close_time2 {
             match self.direction {
                 DealDirection::Sell1Buy2 => {
-                    let revenue = self.entry_price1 + v2.bid;
-                    let cost = self.entry_price2 + v1.ask;
+                    let revenue = self.entry_price1 + p2; // bid
+                    let cost = self.entry_price2 + p1; // ask
 
                     if log {
                         println!(
-                            "sell GLU6 {} buy GLZ6 {} on {} -> buy GLU6 {} sell GLZ6 {} on {}, revenue {}, cost {}",
+                            "sell GLU6 @ {} buy GLZ6 @ {} at {} -> buy GLU6 @ {} at {} sell GLZ6 {} at {}, revenue {}, cost {}",
                             self.entry_price1, self.entry_price2, self.open_time,
-                            v1.ask, v2.bid, v1.time.max(v2.time),
+                            p1, close_time1, p2, close_time2,
                             revenue, cost,
                         );
                     }
 
-                    (v1.time.max(v2.time), revenue, cost)
+                    (close_time1.max(close_time2), revenue, cost)
                 }
 
                 DealDirection::Buy1Sell2 => {
-                    let revenue = self.entry_price2 + v1.bid;
-                    let cost = self.entry_price1 + v2.ask;
+                    let revenue = self.entry_price2 + p1; // bid
+                    let cost = self.entry_price1 + p2; // ask
 
                     if log {
                         println!(
-                            "Buy GLU6 {} sell GLZ6 {} on {} -> sell GLU6 {} buy GLZ6 {} on {}, revenue {}, cost {}",
+                            "Buy GLU6 @ {} sell GLZ6 @ {} at {} -> sell GLU6 @ {} at {} buy GLZ6 @ {} at {}, revenue {}, cost {}",
                             self.entry_price1, self.entry_price2, self.open_time,
-                            v1.bid, v2.ask, v2.time.max(v1.time),
+                            p1, close_time1, p2, close_time2,
                             revenue, cost,
                         );
                     }
 
-                    (v1.time.max(v2.time), revenue, cost)
+                    (close_time1.max(close_time2), revenue, cost)
                 }
             }
         } else {
@@ -138,16 +142,17 @@ pub fn signal_strength_map(events: &[OrderBookEvent], params: &SignalParams) {
             OrderBookEvent::Instrument2(values) => {
                 last2 = Some(*values)
             },
+            _ => {},
         }
         if let Some(values1) = last1 && let Some(values2) = last2 {
             let cur_signal = params.calc_signal(&values1, &values2);
 
             if let Some(mut deal) = cur_deal {
                 if values1.time > deal.open_time + TimeDelta::milliseconds(params.hold_ms as i64) {
-                    deal.close_instrument1(values1);
+                    deal.close_instrument1(get_close_price_from_values1(&deal, &values1), values1.time);
                 }
                 if values2.time > deal.open_time + TimeDelta::milliseconds(params.hold_ms as i64) {
-                    deal.close_instrument2(values2);
+                    deal.close_instrument2(get_close_price_from_values2(&deal, &values2), values2.time);
                 }
                 if deal.is_completed() {
                     let (_, revenue, cost) = deal.close(false);
@@ -204,6 +209,7 @@ pub fn log_simulation(events: &[OrderBookEvent], params: &SignalParams) {
                 println!("Instrument2 event: {} - ask {}, bid {}", values.time, values.ask, values.bid);
                 last2 = Some(*values)
             },
+            _ => {},
         }
         if let Some(values1) = last1 && let Some(values2) = last2 {
             let cur_signal = params.calc_signal(&values1, &values2);
@@ -211,10 +217,10 @@ pub fn log_simulation(events: &[OrderBookEvent], params: &SignalParams) {
 
             if let Some(mut deal) = cur_deal {
                 if values1.time > deal.open_time + TimeDelta::milliseconds(params.hold_ms as i64) {
-                    deal.close_instrument1(values1);
+                    deal.close_instrument1(get_close_price_from_values1(&deal, &values1), values1.time);
                 }
                 if values2.time > deal.open_time + TimeDelta::milliseconds(params.hold_ms as i64) {
-                    deal.close_instrument2(values2);
+                    deal.close_instrument2(get_close_price_from_values2(&deal, &values2), values2.time);
                 }
                 if deal.is_completed() {
                     let _ = deal.close(true);
@@ -243,37 +249,112 @@ pub fn log_simulation(events: &[OrderBookEvent], params: &SignalParams) {
     println!("Signal changes: {signal_changes}");
 }
 
-pub fn run_simulation(events: &[OrderBookEvent], params: &SignalParams, log: bool, threshold: f64) -> SimulationResult {
+fn get_close_price_from_values1(deal: &Deal, values: &OrderBookValues) -> f64 {
+    match deal.direction {
+        DealDirection::Sell1Buy2 => values.bid,
+        DealDirection::Buy1Sell2 => values.ask,
+    }
+}
+
+fn get_close_price_from_values2(deal: &Deal, values: &OrderBookValues) -> f64 {
+    match deal.direction {
+        DealDirection::Sell1Buy2 => values.ask,
+        DealDirection::Buy1Sell2 => values.bid,
+    }
+}
+
+fn check_close_trade_direction1(deal: &Deal, trade: &Trade) -> bool {
+    match deal.direction {
+        DealDirection::Sell1Buy2 => trade.direction.map(|dir| dir == 'b').unwrap_or(false),
+        DealDirection::Buy1Sell2 => trade.direction.map(|dir| dir == 's').unwrap_or(false),
+    }
+}
+
+fn check_close_trade_direction2(deal: &Deal, trade: &Trade) -> bool {
+    match deal.direction {
+        DealDirection::Sell1Buy2 => trade.direction.map(|dir| dir == 's').unwrap_or(false),
+        DealDirection::Buy1Sell2 => trade.direction.map(|dir| dir == 'b').unwrap_or(false),
+    }
+}
+
+fn find_order_books_with_latency(
+    events: &[OrderBookEvent],
+    mut index: usize,
+    v1: &OrderBookValues,
+    v2: &OrderBookValues,
+    latency: u16
+) -> Option<(OrderBookValues, OrderBookValues)> {
+    if latency == 0 {
+        return Some((*v1, *v2));
+    }
+
+    let target_time = v1.time.max(v2.time) + TimeDelta::milliseconds(latency as i64);
+    let (mut v1, mut v2) = (None, None);
+    while index < events.len() {
+        match events[index] {
+            OrderBookEvent::Instrument1(v) => {
+                if v.time >= target_time {
+                    v1 = Some(v);
+                }
+            }
+            OrderBookEvent::Instrument2(v) => {
+                if v.time >= target_time {
+                    v2 = Some(v);
+                }
+            }
+            _ => {}
+        }
+        if let Some(v1) = v1 && let Some(v2) = v2 {
+            return Some((v1, v2));
+        }
+        index += 1;
+    }
+    None
+}
+
+pub fn run_simulation(events: &[OrderBookEvent], params: &SignalParams, signal_threshold: f64, latency: u16, log: bool) -> SimulationResult {
     let (mut win, mut loss) = (0, 0);
     let (mut total_revenue, mut total_cost) = (0.0, 0.0);
     let mut cur_deal = Option::<Deal>::None;
-    let (mut last1, mut last2) = (None, None);
+    let (mut last_order_book1, mut last_order_book2) = (None, None);
+    let (mut last_deal1, mut last_deal2) = (None, None);
     let mut next_deal_time = Option::<DateTime<Utc>>::None;
     let mut prev_signal = Signal::None;
-    for event in events {
+    for (i, event) in events.iter().enumerate() {
         match event {
-            OrderBookEvent::Instrument1(values) => last1 = Some(*values),
-            OrderBookEvent::Instrument2(values) => last2 = Some(*values),
+            OrderBookEvent::Instrument1(values) => last_order_book1 = Some(*values),
+            OrderBookEvent::Instrument2(values) => last_order_book2 = Some(*values),
+            OrderBookEvent::Deal1(trade) => last_deal1 = Some(*trade),
+            OrderBookEvent::Deal2(trade) => last_deal2 = Some(*trade),
         }
-        if let Some(values1) = last1 && let Some(values2) = last2 {
+
+        if let Some(mut deal) = cur_deal {
+            if let Some(trade) = last_deal1 &&
+                check_close_trade_direction1(&deal, &trade) &&
+                trade.created > deal.open_time + TimeDelta::milliseconds(params.hold_ms as i64) &&
+                let Some(price) = trade.price {
+                deal.close_instrument1(price.as_f64(), trade.created)
+            }
+            if let Some(trade) = last_deal2 &&
+                check_close_trade_direction2(&deal, &trade) &&
+                trade.created > deal.open_time + TimeDelta::milliseconds(params.hold_ms as i64) &&
+                let Some(price) = trade.price {
+                deal.close_instrument2(price.as_f64(), trade.created)
+            }
+            if deal.is_completed() {
+                let (time, revenue, cost) = deal.close(log);
+                next_deal_time = Some(time + TimeDelta::milliseconds(10));
+                if revenue > cost {win += 1} else {loss += 1};
+                total_revenue += revenue;
+                total_cost += cost;
+                cur_deal = None;
+            }
+        }
+
+        if let Some(values1) = last_order_book1 && let Some(values2) = last_order_book2 {
             let cur_signal = params.calc_signal(&values1, &values2);
 
-            if let Some(mut deal) = cur_deal {
-                if values1.time > deal.open_time + TimeDelta::milliseconds(params.hold_ms as i64) {
-                    deal.close_instrument1(values1);
-                }
-                if values2.time > deal.open_time + TimeDelta::milliseconds(params.hold_ms as i64) {
-                    deal.close_instrument2(values2);
-                }
-                if deal.is_completed() {
-                    let (time, revenue, cost) = deal.close(log);
-                    next_deal_time = Some(time + TimeDelta::milliseconds(10));
-                    if revenue > cost {win += 1} else {loss += 1};
-                    total_revenue += revenue;
-                    total_cost += cost;
-                    cur_deal = None;
-                }
-            } else {
+            if cur_deal.is_none() {
                 if let Some(next_deal_time) = next_deal_time &&
                     (values1.time < next_deal_time || values2.time < next_deal_time) {
                     continue;
@@ -283,13 +364,15 @@ pub fn run_simulation(events: &[OrderBookEvent], params: &SignalParams, log: boo
                     cur_deal = match cur_signal {
                         Signal::None => None,
                         Signal::Buy1Sell2(signal) => {
-                            if signal > threshold {
-                                Some(Deal::buy1_sell2(values1, values2))
+                            if signal > signal_threshold &&
+                                let Some((v1, v2)) = find_order_books_with_latency(events, i, &values1, &values2, latency) {
+                                Some(Deal::buy1_sell2(v1, v2))
                             } else { None }
                         },
                         Signal::Sell1Buy2(signal) => {
-                            if signal > threshold {
-                                Some(Deal::sell1_buy2(values1, values2))
+                            if signal > signal_threshold &&
+                                let Some((v1, v2)) = find_order_books_with_latency(events, i, &values1, &values2, latency) {
+                                Some(Deal::sell1_buy2(v1, v2))
                             } else { None }
                         },
                     };

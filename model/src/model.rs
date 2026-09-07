@@ -45,7 +45,7 @@ pub struct OrderDataSlice {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Trade {
-    pub id: Option<i16>,
+    pub id: Option<i64>,
     pub created: DateTime<Utc>,
     pub instrument_id: i16,
     pub price: Option<Decimal>,
