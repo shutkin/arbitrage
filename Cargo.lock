@@ -837,6 +837,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "correlation"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "104c4c1a57779f6e7fe8e28bd66dd12f9bccb22849f63302b6cd25b4789513ef"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1156,6 +1162,7 @@ dependencies = [
  "argmin",
  "bincode",
  "chrono",
+ "correlation",
  "db",
  "dotenv",
  "log",

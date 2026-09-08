@@ -1,8 +1,8 @@
 use crate::deal::{Deal, DealDirection};
 use crate::signal_params::{Signal, SignalParams};
-use crate::stats_collector::StatisticsProvider;
-use crate::{MarketEvent, OrderBookValues, COMMISSION_RATIO};
+use crate::{COMMISSION_RATIO, MarketEvent, OrderBookValues};
 use chrono::{DateTime, TimeDelta, Utc};
+use correlation::spearmanr;
 use model::Trade;
 
 pub struct SimulationResult {
@@ -45,10 +45,8 @@ fn check_close_trade_direction2(deal: &Deal, trade: &Trade) -> bool {
 pub fn find_order_books_on_horizon(
     events: &[MarketEvent],
     mut index: usize,
-    cur_time: DateTime<Utc>,
-    timeout: u32
+    target_time: DateTime<Utc>,
 ) -> Option<(OrderBookValues, OrderBookValues)> {
-    let target_time = cur_time + TimeDelta::milliseconds(timeout as i64);
     let (mut v1, mut v2) = (None, None);
     while index < events.len() {
         match events[index] {
@@ -90,8 +88,8 @@ pub fn run_stats(events: &[MarketEvent], params: &SignalParams, deal_handler: &m
             MarketEvent::Deal2(_) => {},
         }
 
-        if let Some(values1) = last_order_book1 && let Some(values2) = last_order_book2 {
-            let cur_signal = params.calc_signal(&values1, &values2);
+        if let Some(values1) = &last_order_book1 && let Some(values2) = &last_order_book2 {
+            let cur_signal = params.signal(values1, values2);
 
             if cur_signal != prev_signal &&
                 let Some(deal) = match cur_signal {
@@ -112,6 +110,7 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams) -> Simulati
     let mut cur_deal = Option::<Deal>::None;
     let (mut last_order_book1, mut last_order_book2) = (None, None);
     let mut prev_signal = Signal::None;
+
     for (i, event) in events.iter().enumerate() {
         match event {
             MarketEvent::OrderBook1(values) => last_order_book1 = Some(*values),
@@ -119,15 +118,21 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams) -> Simulati
             _ => {},
         }
 
-        if let Some(mut deal) = cur_deal {
+        if let Some(deal) = cur_deal.as_mut() {
             if let Some(v) = last_order_book1 &&
                 v.time > deal.get_open_time() + TimeDelta::milliseconds(params.hold_ms as i64) {
-                let price = get_close_price_from_values1(&deal, &v);
+                let price = match deal.get_direction() {
+                    DealDirection::Sell1Buy2 => v.bid,
+                    DealDirection::Buy1Sell2 => v.ask,
+                };
                 deal.close_instrument1(price, v.time)
             }
             if let Some(v) = last_order_book2 &&
                 v.time > deal.get_open_time() + TimeDelta::milliseconds(params.hold_ms as i64) {
-                let price = get_close_price_from_values2(&deal, &v);
+                let price = match deal.get_direction() {
+                    DealDirection::Sell1Buy2 => v.ask,
+                    DealDirection::Buy1Sell2 => v.bid,
+                };
                 deal.close_instrument2(price, v.time)
             }
             if deal.is_completed() {
@@ -139,8 +144,8 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams) -> Simulati
             }
         }
 
-        if let Some(values1) = last_order_book1 && let Some(values2) = last_order_book2 {
-            let cur_signal = params.calc_signal(&values1, &values2);
+        if let Some(values1) = &last_order_book1 && let Some(values2) = &last_order_book2 {
+            let cur_signal = params.signal(values1, values2);
 
             if cur_deal.is_none() &&
                 cur_signal != prev_signal {
@@ -206,8 +211,8 @@ pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, l
             }
         }
 
-        if let Some(values1) = last_order_book1 && let Some(values2) = last_order_book2 {
-            let cur_signal = params.calc_signal(&values1, &values2);
+        if let Some(values1) = &last_order_book1 && let Some(values2) = &last_order_book2 {
+            let cur_signal = params.signal(&values1, &values2);
 
             if cur_deal.is_none() {
                 if let Some(next_deal_time) = next_deal_time &&
@@ -221,15 +226,17 @@ pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, l
                         Signal::Buy1Sell2 => {
                             if latency == 0 {
                                 Some(Deal::buy1_sell2(values1, values2))
-                            } else if let Some((v1, v2)) = find_order_books_on_horizon(events, i, values1.time.max(values2.time), latency) {
-                                Some(Deal::buy1_sell2(v1, v2))
+                            } else if let Some((v1, v2)) =
+                                find_order_books_on_horizon(events, i, values1.time.max(values2.time) + TimeDelta::milliseconds(latency as i64)) {
+                                Some(Deal::buy1_sell2(&v1, &v2))
                             } else { None }
                         },
                         Signal::Sell1Buy2 => {
                             if latency == 0 {
                                 Some(Deal::sell1_buy2(values1, values2))
-                            } else if let Some((v1, v2)) = find_order_books_on_horizon(events, i, values1.time.max(values2.time), latency) {
-                                Some(Deal::sell1_buy2(v1, v2))
+                            } else if let Some((v1, v2)) =
+                                find_order_books_on_horizon(events, i, values1.time.max(values2.time) + TimeDelta::milliseconds(latency as i64)) {
+                                Some(Deal::sell1_buy2(&v1, &v2))
                             } else { None }
                         },
                     };

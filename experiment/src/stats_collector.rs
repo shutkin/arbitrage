@@ -4,6 +4,7 @@ use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
 use crate::{COMMISSION_RATIO, MarketEvent};
 use log::info;
 use std::collections::HashMap;
+use chrono::TimeDelta;
 
 pub trait StatisticsProvider {
     fn variants(&self) -> Vec<String>;
@@ -41,7 +42,9 @@ pub fn threshold_horizon_probabilities(events: &[MarketEvent], params: SignalPar
     impl DealHandler for Handler {
         fn handle_deal(&mut self, events: &[MarketEvent], event_index: usize, deal: Deal) {
             for horizon in HORIZONS {
-                if let Some((v1, v2)) = find_order_books_on_horizon(events, event_index, deal.get_open_time(), horizon) {
+                if let Some((v1, v2)) = find_order_books_on_horizon(
+                    events, event_index, deal.get_open_time() + TimeDelta::milliseconds(horizon as i64)
+                ) {
                     let mut deal_copy = deal;
                     match deal_copy.get_direction() {
                         DealDirection::Sell1Buy2 => {
@@ -90,11 +93,11 @@ pub fn threshold_horizon_probabilities(events: &[MarketEvent], params: SignalPar
         }
 
         fn run(&mut self, variant: u8) -> Vec<(String, String)> {
-            self.params.signal_threshold = match variant {
+            /*self.params.signal_threshold = match variant {
                 1 => 5.0,
                 2 => 10.0,
                 _ => 0.0,
-            };
+            };*/
             self.deal_handler.init(variant);
             run_stats(self.events, &self.params, self.deal_handler)
         }
@@ -125,7 +128,9 @@ pub fn signal_after_deal(events: &[MarketEvent], params: SignalParams) -> String
     impl DealHandler for Handler {
         fn handle_deal(&mut self, events: &[MarketEvent], event_index: usize, deal: Deal) {
             for horizon in HORIZONS {
-                if let Some((v1, v2)) = find_order_books_on_horizon(events, event_index, deal.get_open_time(), horizon) {
+                if let Some((v1, v2)) = find_order_books_on_horizon(
+                    events, event_index, deal.get_open_time() + TimeDelta::milliseconds(horizon as i64)
+                ) {
                     let score = self.params.signal_score(&v1, &v2).unwrap_or(0.0);
                     self.map.get_mut(&horizon).unwrap().push(score);
                 }
@@ -179,11 +184,11 @@ pub fn signal_after_deal(events: &[MarketEvent], params: SignalParams) -> String
         }
 
         fn run(&mut self, variant: u8) -> Vec<(String, String)> {
-            self.params.signal_threshold = match variant {
+            /*self.params.signal_threshold = match variant {
                 2 | 3 => 5.0,
                 4 | 5 => 10.0,
                 _ => 0.0,
-            };
+            };*/
             self.deal_handler.init(variant);
             run_stats(self.events, &self.params, self.deal_handler)
         }

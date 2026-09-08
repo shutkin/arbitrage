@@ -19,7 +19,7 @@ pub struct Deal {
 }
 
 impl Deal {
-    pub fn sell1_buy2(v1: OrderBookValues, v2: OrderBookValues) -> Self {
+    pub fn sell1_buy2(v1: &OrderBookValues, v2: &OrderBookValues) -> Self {
         Self {
             open_time: v1.time.max(v2.time),
             direction: DealDirection::Sell1Buy2,
@@ -37,7 +37,7 @@ impl Deal {
         }
     }
 
-    pub fn buy1_sell2(v1: OrderBookValues, v2: OrderBookValues) -> Self {
+    pub fn buy1_sell2(v1: &OrderBookValues, v2: &OrderBookValues) -> Self {
         Self {
             open_time: v1.time.max(v2.time),
             direction: DealDirection::Buy1Sell2,
@@ -54,11 +54,11 @@ impl Deal {
             close_time2: None,
         }
     }
-    
+
     pub fn get_direction(&self) -> DealDirection {
         self.direction
     }
-    
+
     pub fn get_open_time(&self) -> DateTime<Utc> {
         self.open_time
     }

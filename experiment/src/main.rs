@@ -42,7 +42,7 @@ async fn get_order_books(tickers: &[&str], ids: &[i16], diapason: TimeDiapason, 
 }
 
 #[tokio::main]
-async fn main() -> EmptyResult {
+async fn _main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -73,7 +73,7 @@ async fn main() -> EmptyResult {
         );
         let events = merge_events(&values1, &all_values2, &trades1, &trades2);
         info!("Total events: {}", events.len());
-
+/*
         // Unknown old params, data from 03.09.2026
         let params = SignalParams { signal_threshold: 0.0, hold_ms: 250, up: Some(SignalParamsDir { alpha: 0.15453738797718342, derivative1_weight: 1.1629761023166723, derivative2_weight: 0.32481462380662857, imbalance1_weights: [-0.09802006258516288, -0.04839597102546962, -0.0549509873464885, -0.15984030244392058], imbalance2_weights: [-0.06759615045675671, -0.049698124522988454, 0.061509796401540175, 0.06838655861917534] }), down: Some(SignalParamsDir { alpha: 0.12809776356042107, derivative1_weight: 1.2524761056539522, derivative2_weight: 1.0711123993550387, imbalance1_weights: [-0.08348685530090004, -0.19510914374521984, -0.22190776923813244, -0.004042762088653724], imbalance2_weights: [-0.05784155826200306, -0.01112889975677297, -0.06887535463793135, -0.12454322697759054] }) };
 
@@ -95,12 +95,12 @@ async fn main() -> EmptyResult {
         let params = SignalParams { hold_ms: 250, signal_threshold: 0.0, up: Some(SignalParamsDir { alpha: -12.872754435045326, derivative1_weight: 0.193634494133364, derivative2_weight: -0.1457796752877215, imbalance1_weights: [0.18149400301128937, 0.3541486748959699, 0.2430203348794835, 0.15951349406028242], imbalance2_weights: [0.010143189611607064, 0.3292634068999326, 0.08917263792538223, 0.02371948518984832] }), down: Some(SignalParamsDir { alpha: -12.64299798348242, derivative1_weight: 0.36230450821391014, derivative2_weight: 0.03658025805441441, imbalance1_weights: [0.18631803136754216, 0.11059152171389611, 0.25328099551332484, 0.3910631898521122], imbalance2_weights: [-0.049288649334782476, 0.14452138108540152, 0.0403198164700859, 0.04841766623946943] }) };
         let result = run_simulation_on_trades(&events, &params, 10, false);
         info!("Simulation profit on {} deals: {:?}", result.win + result.loss, result.income - result.outcome - result.commission);
-    }
+*/    }
     Ok(())
 }
 
 #[tokio::main]
-async fn _main() -> EmptyResult {
+async fn main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -112,8 +112,8 @@ async fn _main() -> EmptyResult {
         DateTime::parse_from_rfc3339("2026-09-04T15:00:00Z")?.to_utc(),
     );
     let train_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-04T04:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-04T20:00:00Z")?.to_utc()
+        DateTime::parse_from_rfc3339("2026-09-03T13:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
     );
 
     let all_instruments = db.get_instruments(false).await?;
@@ -121,15 +121,11 @@ async fn _main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-        let mut chunk_start = train_diapason.from - Duration::milliseconds(1);
+        info!("Train on {train_diapason:?}");
         let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
-        while chunk_start < train_diapason.to - Duration::hours(1) {
-            let chunk_end = (chunk_start + Duration::minutes(120)).min(train_diapason.to);
-            let diapason = TimeDiapason::new(chunk_start + Duration::milliseconds(1), chunk_end);
-            let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
-            convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
-            chunk_start = chunk_end;
-        }
+
+        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], train_diapason, Some(&db)).await?;
+        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
         info!("Calculate std deviations");
         calculate_std_deviations(&mut all_values1);
         calculate_std_deviations(&mut all_values2);
@@ -137,7 +133,8 @@ async fn _main() -> EmptyResult {
         let params = calibrate_params(&merge_events(&all_values1, &all_values2, &[], &[]));
         info!("{params:?}");
 
-        /*all_values1.clear();
+        info!("Test on {test_diapason:?}");
+        all_values1.clear();
         all_values2.clear();
         let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], test_diapason, Some(&db)).await?;
         convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
@@ -149,9 +146,9 @@ async fn _main() -> EmptyResult {
         let trades2 = db.get_trades(inst2_id, test_diapason).await?;
         let events = merge_events(&all_values1, &all_values2, &trades1, &trades2);
 
-        let result = run_simulation(&events, &params, 10, true);
-        info!("Wins {}, losses {}", result.win, result.loss);
-        info!("Income {}, outcome {}, commission {}, profit {}", result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);*/
+        let result = run_simulation_on_trades(&events, &params, 10, false);
+        info!("Deals {}. Income {}, outcome {}, commission {}, net {}",
+            result.win + result.loss, result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);
     }
 
     Ok(())

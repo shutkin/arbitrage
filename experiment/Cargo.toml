@@ -14,3 +14,4 @@ log = "0.4"
 bincode = { version = "2.0", features = ["serde"] }
 argmin = { version = "0.11.0", features = ["_ndarrayl"] }
 ndarray = "0.16"
+correlation = "0.1"
