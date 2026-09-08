@@ -1,0 +1,139 @@
+use chrono::{DateTime, Utc};
+use crate::OrderBookValues;
+
+#[derive(Copy, Clone)]
+pub enum DealDirection {
+    Sell1Buy2, Buy1Sell2,
+}
+
+#[derive(Copy, Clone)]
+pub struct Deal {
+    direction: DealDirection,
+    open_time: DateTime<Utc>,
+    entry_price1: f64,
+    entry_price2: f64,
+    close_price1: Option<f64>,
+    close_price2: Option<f64>,
+    close_time1: Option<DateTime<Utc>>,
+    close_time2: Option<DateTime<Utc>>,
+}
+
+impl Deal {
+    pub fn sell1_buy2(v1: OrderBookValues, v2: OrderBookValues) -> Self {
+        Self {
+            open_time: v1.time.max(v2.time),
+            direction: DealDirection::Sell1Buy2,
+
+            // Sell GLU6 -> bid
+            entry_price1: v1.bid,
+
+            // Buy GLZ6 -> ask
+            entry_price2: v2.ask,
+
+            close_price1: None,
+            close_price2: None,
+            close_time1: None,
+            close_time2: None,
+        }
+    }
+
+    pub fn buy1_sell2(v1: OrderBookValues, v2: OrderBookValues) -> Self {
+        Self {
+            open_time: v1.time.max(v2.time),
+            direction: DealDirection::Buy1Sell2,
+
+            // Buy GLU6 -> ask
+            entry_price1: v1.ask,
+
+            // Sell GLZ6 -> bid
+            entry_price2: v2.bid,
+
+            close_price1: None,
+            close_price2: None,
+            close_time1: None,
+            close_time2: None,
+        }
+    }
+    
+    pub fn get_direction(&self) -> DealDirection {
+        self.direction
+    }
+    
+    pub fn get_open_time(&self) -> DateTime<Utc> {
+        self.open_time
+    }
+
+    pub fn close_instrument1(&mut self, price: f64, time: DateTime<Utc>) {
+        if self.close_price1.is_none() {
+            self.close_price1 = Some(price);
+            self.close_time1 = Some(time);
+        }
+    }
+
+    pub fn close_instrument2(&mut self, price: f64, time: DateTime<Utc>) {
+        if self.close_price2.is_none() {
+            self.close_price2 = Some(price);
+            self.close_time2 = Some(time);
+        }
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.close_price1.is_some() && self.close_price2.is_some()
+    }
+
+    pub fn legs_profits(&self) -> (f64, f64) {
+        match self.direction {
+            DealDirection::Sell1Buy2 => {
+                let leg1 = self.entry_price1 - self.close_price1.unwrap();
+                let leg2 = self.close_price2.unwrap() - self.entry_price2;
+                (leg1, leg2)
+            },
+            DealDirection::Buy1Sell2 => {
+                let leg1 = self.close_price1.unwrap() - self.entry_price1;
+                let leg2 = self.entry_price2 - self.close_price2.unwrap();
+                (leg1, leg2)
+            }
+        }
+    }
+
+    pub fn close(&self, log: bool) -> (DateTime<Utc>, f64, f64) {
+        if let Some(p1) = self.close_price1 && let Some (p2) = self.close_price2 &&
+            let Some(close_time1) = self.close_time1 && let Some(close_time2) = self.close_time2 {
+            match self.direction {
+                DealDirection::Sell1Buy2 => {
+                    let revenue = self.entry_price1 + p2; // bid
+                    let cost = self.entry_price2 + p1; // ask
+
+                    if log {
+                        println!(
+                            "sell GLU6 @ {} buy GLZ6 @ {} at {} -> buy GLU6 @ {} at {} sell GLZ6 {} at {}, revenue {}, cost {}",
+                            self.entry_price1, self.entry_price2, self.open_time,
+                            p1, close_time1, p2, close_time2,
+                            revenue, cost,
+                        );
+                    }
+
+                    (close_time1.max(close_time2), revenue, cost)
+                }
+
+                DealDirection::Buy1Sell2 => {
+                    let revenue = self.entry_price2 + p1; // bid
+                    let cost = self.entry_price1 + p2; // ask
+
+                    if log {
+                        println!(
+                            "Buy GLU6 @ {} sell GLZ6 @ {} at {} -> sell GLU6 @ {} at {} buy GLZ6 @ {} at {}, revenue {}, cost {}",
+                            self.entry_price1, self.entry_price2, self.open_time,
+                            p1, close_time1, p2, close_time2,
+                            revenue, cost,
+                        );
+                    }
+
+                    (close_time1.max(close_time2), revenue, cost)
+                }
+            }
+        } else {
+            panic!("Close unfinished deal");
+        }
+    }
+}

@@ -1,18 +1,19 @@
-use crate::{OrderBookEvent, OrderBookValues};
-use crate::simulation::{DealDirection, run_simulation};
+use crate::{MarketEvent, OrderBookValues};
+use crate::simulation::run_simulation;
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
 use argmin::solver::particleswarm::ParticleSwarm;
 use log::{error, info, warn};
 use ndarray::Array1;
+use crate::deal::DealDirection;
 
 pub const IMBALANCE_LEVELS: [usize; 4] = [3, 5, 10, 20];
-const DEFAULT_HOLD_MS: u16 = 250;
+const DEFAULT_HOLD_MS: u16 = 300;// 250;
 const SOLVER_ITERATIONS: u64 = 8192;
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct SignalParamsDir {
-    pub threshold: f64,
+    pub alpha: f64,
     pub derivative1_weight: f64,
     pub derivative2_weight: f64,
     pub imbalance1_weights: [f64; IMBALANCE_LEVELS.len()],
@@ -22,7 +23,7 @@ pub struct SignalParamsDir {
 impl SignalParamsDir {
     pub fn from_array(array: &Array1<f64>) -> Self {
         Self {
-            threshold: array[0],
+            alpha: array[0],
             derivative1_weight: array[1].max(0.0),
             derivative2_weight: array[2],
             imbalance1_weights: [array[3], array[4], array[5], array[6]],
@@ -34,6 +35,7 @@ impl SignalParamsDir {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct SignalParams {
     pub hold_ms: u16,
+    pub signal_threshold: f64,
     pub up: Option<SignalParamsDir>,
     pub down: Option<SignalParamsDir>,
 }
@@ -41,26 +43,32 @@ pub struct SignalParams {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Signal {
     None,
-    Buy1Sell2(f64),
-    Sell1Buy2(f64),
+    Buy1Sell2,
+    Sell1Buy2,
 }
 
 impl SignalParams {
-    pub fn calc_signal(&self, values1: &OrderBookValues, values2: &OrderBookValues) -> Signal {
+    pub fn signal_score(&self, values1: &OrderBookValues, values2: &OrderBookValues) -> Option<f64> {
         let params = if values1.std_derivative > 0.0 {&self.up} else {&self.down};
         if let Some(params) = params {
-            let mut signal = params.threshold
+            let mut signal = params.alpha
                 + params.derivative1_weight * values1.std_derivative.abs()
                 + params.derivative2_weight * values2.std_derivative;
             for i in 0..IMBALANCE_LEVELS.len() {
                 signal += params.imbalance1_weights[i] * values1.imbalances[i]
                     + params.imbalance2_weights[i] * values2.imbalances[i];
             }
-            if signal > 0.0 {
+            Some(signal)
+        } else { None }
+    }
+
+    pub fn calc_signal(&self, values1: &OrderBookValues, values2: &OrderBookValues) -> Signal {
+        if let Some(signal) = self.signal_score(values1, values2) {
+            if signal > self.signal_threshold {
                 if values1.std_derivative < 0.0 {
-                    Signal::Buy1Sell2(signal)
+                    Signal::Buy1Sell2
                 } else {
-                    Signal::Sell1Buy2(signal)
+                    Signal::Sell1Buy2
                 }
             } else {
                 Signal::None
@@ -73,7 +81,7 @@ impl SignalParams {
 
 struct TradingProblem<'a> {
     direction: DealDirection,
-    events: &'a [OrderBookEvent],
+    events: &'a [MarketEvent],
 }
 
 impl CostFunction for TradingProblem<'_> {
@@ -82,28 +90,27 @@ impl CostFunction for TradingProblem<'_> {
 
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
         let dir_params = SignalParamsDir::from_array(p);
-        if dir_params.derivative1_weight < 0.0 {
-            return Err(Error::msg("Negative derivative weight"));
-        }
         let params = match self.direction {
             DealDirection::Sell1Buy2 => SignalParams {
                 hold_ms: DEFAULT_HOLD_MS,
+                signal_threshold: 0.0,
                 up: Some(dir_params),
                 down: None,
             },
             DealDirection::Buy1Sell2 => SignalParams {
                 hold_ms: DEFAULT_HOLD_MS,
+                signal_threshold: 0.0,
                 up: None,
                 down: Some(dir_params),
             },
         };
-        let result = run_simulation(self.events, &params, 0.0, 0, false);
-        let profit = result.income - result.outcome - result.commission;
+        let result = run_simulation(self.events, &params);
+        let profit = result.income - result.outcome;// - result.commission;
         Ok(-profit)
     }
 }
 
-pub fn calibrate_params(events: &[OrderBookEvent]) -> SignalParams {
+pub fn calibrate_params(events: &[MarketEvent]) -> SignalParams {
     let initial = Array1::from_vec(vec![
         -3.0,  // A
         1.0,  // B1
@@ -172,12 +179,13 @@ pub fn calibrate_params(events: &[OrderBookEvent]) -> SignalParams {
 
     SignalParams {
         hold_ms: DEFAULT_HOLD_MS,
+        signal_threshold: 0.0,
         up: Some(params_up),
         down: Some(params_down),
     }
 }
 
-pub fn _calibrate_params(events: &[OrderBookEvent]) -> SignalParams {
+pub fn _calibrate_params(events: &[MarketEvent]) -> SignalParams {
     let bounds_down = Array1::from_vec(vec![-30.0, 0.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]);
     let bounds_up = Array1::from_vec(vec![-5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
 
@@ -237,6 +245,7 @@ pub fn _calibrate_params(events: &[OrderBookEvent]) -> SignalParams {
 
     SignalParams {
         hold_ms: DEFAULT_HOLD_MS,
+        signal_threshold: 0.0,
         up: params_up,
         down: params_down,
     }

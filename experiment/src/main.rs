@@ -2,18 +2,21 @@ mod order_book_cache;
 mod signal_params;
 mod math_utils;
 mod simulation;
-
-extern crate core;
+mod stats_collector;
+mod deal;
 
 use crate::math_utils::std_derivative;
 use crate::signal_params::{IMBALANCE_LEVELS, SignalParams, SignalParamsDir, calibrate_params};
-use crate::simulation::{log_simulation, run_simulation, signal_strength_map};
+use crate::simulation::run_simulation_on_trades;
 use chrono::{DateTime, Duration, TimeDelta, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::info;
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::{Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
+use crate::stats_collector::{signal_after_deal, threshold_horizon_probabilities};
+
+const COMMISSION_RATIO: f64 = 0.015 / 100.0;
 
 fn find_instrument_id(instruments: &[Instrument], ticker: &str) -> Option<i16> {
     instruments
@@ -70,36 +73,28 @@ async fn main() -> EmptyResult {
         );
         let events = merge_events(&values1, &all_values2, &trades1, &trades2);
         info!("Total events: {}", events.len());
-        let mut params = SignalParams { hold_ms: 250, up: Some(SignalParamsDir { threshold: 0.15453738797718342, derivative1_weight: 1.1629761023166723, derivative2_weight: 0.32481462380662857, imbalance1_weights: [-0.09802006258516288, -0.04839597102546962, -0.0549509873464885, -0.15984030244392058], imbalance2_weights: [-0.06759615045675671, -0.049698124522988454, 0.061509796401540175, 0.06838655861917534] }), down: Some(SignalParamsDir { threshold: 0.12809776356042107, derivative1_weight: 1.2524761056539522, derivative2_weight: 1.0711123993550387, imbalance1_weights: [-0.08348685530090004, -0.19510914374521984, -0.22190776923813244, -0.004042762088653724], imbalance2_weights: [-0.05784155826200306, -0.01112889975677297, -0.06887535463793135, -0.12454322697759054] }) };
 
-        for signal_threshold in [
-            0.0, 5.0, 10.0, 15.0, 20.0,
-            25.0, 30.0, 35.0, 40.0, 50.0,
-            75.0, 100.0, 125.0, 150.0
-        ] {
-            let result = run_simulation(&events, &params, signal_threshold, 0, false);
-            println!("{signal_threshold} | {} | {:.1} | {:.1} | {:.1}",
-                     result.win + result.loss, result.income - result.outcome, result.commission,
-                     result.income - result.outcome - result.commission);
-        }
-        println!();
+        // Unknown old params, data from 03.09.2026
+        let params = SignalParams { signal_threshold: 0.0, hold_ms: 250, up: Some(SignalParamsDir { alpha: 0.15453738797718342, derivative1_weight: 1.1629761023166723, derivative2_weight: 0.32481462380662857, imbalance1_weights: [-0.09802006258516288, -0.04839597102546962, -0.0549509873464885, -0.15984030244392058], imbalance2_weights: [-0.06759615045675671, -0.049698124522988454, 0.061509796401540175, 0.06838655861917534] }), down: Some(SignalParamsDir { alpha: 0.12809776356042107, derivative1_weight: 1.2524761056539522, derivative2_weight: 1.0711123993550387, imbalance1_weights: [-0.08348685530090004, -0.19510914374521984, -0.22190776923813244, -0.004042762088653724], imbalance2_weights: [-0.05784155826200306, -0.01112889975677297, -0.06887535463793135, -0.12454322697759054] }) };
 
-        for hold_time in [50, 100, 250, 500, 1000, 2000] {
-            params.hold_ms = hold_time;
-            let result = run_simulation(&events, &params, 0.0, 0, false);
-            println!("{hold_time} | {} | {:.1} | {:.1} | {:.1}",
-                     result.win + result.loss, result.income - result.outcome, result.commission,
-                     result.income - result.outcome - result.commission);
-        }
-        println!();
+        let table = threshold_horizon_probabilities(&events, params);
+        info!("threshold_horizon_probabilities:\n{}", table);
 
-        params.hold_ms = 250;
-        for latency in [0, 10, 25, 50, 100] {
-            let result = run_simulation(&events, &params, 0.0, latency, false);
-            println!("{latency} | {} | {:.1} | {:.1} | {:.1}",
-                     result.win + result.loss, result.income - result.outcome, result.commission,
-                     result.income - result.outcome - result.commission);
-        }
+        let table = signal_after_deal(&events, params);
+        info!("signal_after_deal:\n{}", table);
+
+        let result = run_simulation_on_trades(&events, &params, 10, false);
+        info!("Simulation profit on {} deals: {:?}", result.win + result.loss, result.income - result.outcome - result.commission);
+
+        // Actual params with no commission, data from 03.09.2026
+        let params = SignalParams { hold_ms: 250, signal_threshold: 0.0, up: Some(SignalParamsDir { alpha: -0.20492515627874663, derivative1_weight: 0.6201758022694368, derivative2_weight: -0.8719143683779658, imbalance1_weights: [0.16343937671236203, 0.03371568907026376, 0.13219643355353505, -0.3484609745459927], imbalance2_weights: [0.043650570830156145, 0.11762212484538968, 0.20559270007913955, 0.053242022584380516] }), down: Some(SignalParamsDir { alpha: -0.1605505448272192, derivative1_weight: 1.8930396501868383, derivative2_weight: -0.28244783119020245, imbalance1_weights: [0.1542439073301614, -0.09103354910836434, -0.39035293689465383, -0.011130502635283455], imbalance2_weights: [-0.03357607437194851, -0.018782747678162147, -0.031572841035818325, 0.02193815722363937] }) };
+        let result = run_simulation_on_trades(&events, &params, 10, false);
+        info!("Simulation profit on {} deals: {:?}", result.win + result.loss, result.income - result.outcome - result.commission);
+
+        // Actual params with commission, data from 03.09.2026
+        let params = SignalParams { hold_ms: 250, signal_threshold: 0.0, up: Some(SignalParamsDir { alpha: -12.872754435045326, derivative1_weight: 0.193634494133364, derivative2_weight: -0.1457796752877215, imbalance1_weights: [0.18149400301128937, 0.3541486748959699, 0.2430203348794835, 0.15951349406028242], imbalance2_weights: [0.010143189611607064, 0.3292634068999326, 0.08917263792538223, 0.02371948518984832] }), down: Some(SignalParamsDir { alpha: -12.64299798348242, derivative1_weight: 0.36230450821391014, derivative2_weight: 0.03658025805441441, imbalance1_weights: [0.18631803136754216, 0.11059152171389611, 0.25328099551332484, 0.3910631898521122], imbalance2_weights: [-0.049288649334782476, 0.14452138108540152, 0.0403198164700859, 0.04841766623946943] }) };
+        let result = run_simulation_on_trades(&events, &params, 10, false);
+        info!("Simulation profit on {} deals: {:?}", result.win + result.loss, result.income - result.outcome - result.commission);
     }
     Ok(())
 }
@@ -117,8 +112,8 @@ async fn _main() -> EmptyResult {
         DateTime::parse_from_rfc3339("2026-09-04T15:00:00Z")?.to_utc(),
     );
     let train_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-03T13:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc()
+        DateTime::parse_from_rfc3339("2026-09-04T04:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-04T20:00:00Z")?.to_utc()
     );
 
     let all_instruments = db.get_instruments(false).await?;
@@ -126,12 +121,7 @@ async fn _main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-        //let mut csv = Vec::new();
-        //let header1 = instrument_csv_header(tickers[0]);
-        //let header2 = instrument_csv_header(tickers[1]);
-        //csv.push(format!("{header1},{header2}"));
         let mut chunk_start = train_diapason.from - Duration::milliseconds(1);
-        let mut prev_log_time = train_diapason.from;
         let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
         while chunk_start < train_diapason.to - Duration::hours(1) {
             let chunk_end = (chunk_start + Duration::minutes(120)).min(train_diapason.to);
@@ -143,12 +133,11 @@ async fn _main() -> EmptyResult {
         info!("Calculate std deviations");
         calculate_std_deviations(&mut all_values1);
         calculate_std_deviations(&mut all_values2);
-        //std::fs::write("results.csv", csv.join("\n"))?;
 
         let params = calibrate_params(&merge_events(&all_values1, &all_values2, &[], &[]));
         info!("{params:?}");
 
-        all_values1.clear();
+        /*all_values1.clear();
         all_values2.clear();
         let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], test_diapason, Some(&db)).await?;
         convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
@@ -156,14 +145,13 @@ async fn _main() -> EmptyResult {
         calculate_std_deviations(&mut all_values1);
         calculate_std_deviations(&mut all_values2);
 
-        let events = merge_events(&all_values1, &all_values2, &[], &[]);
-        log_simulation(&events[0..10000], &params);
+        let trades1 = db.get_trades(inst1_id, test_diapason).await?;
+        let trades2 = db.get_trades(inst2_id, test_diapason).await?;
+        let events = merge_events(&all_values1, &all_values2, &trades1, &trades2);
 
-        /*
-        let result = run_simulation(&merge_events(&all_values1, &all_values2), &params, true);
+        let result = run_simulation(&events, &params, 10, true);
         info!("Wins {}, losses {}", result.win, result.loss);
-        info!("Income {}, outcome {}, commission {}, profit {}", result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);
-         */
+        info!("Income {}, outcome {}, commission {}, profit {}", result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);*/
     }
 
     Ok(())
@@ -174,7 +162,7 @@ fn convert_values(order_books1: &[OrderBook], order_books2: &[OrderBook], all_va
     all_values2.extend(order_books2.iter().filter_map(calculate_values));
 }
 
-fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues], trades1: &[Trade], trades2: &[Trade]) -> Vec<OrderBookEvent> {
+fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues], trades1: &[Trade], trades2: &[Trade]) -> Vec<MarketEvent> {
     let mut events = Vec::with_capacity(values1.len() + values2.len());
     let (mut v_index1, mut v_index2, mut t_index1, mut t_index2) = (0, 0, 0, 0);
     while v_index1 < values1.len() || v_index2 < values2.len() || t_index1 < trades1.len() || t_index2 < trades2.len() {
@@ -182,7 +170,7 @@ fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues], trades
         let mut cur_event_time = None;
         
         if let Some(v) = values1.get(v_index1) {
-            let event = OrderBookEvent::Instrument1(*v);
+            let event = MarketEvent::OrderBook1(*v);
             let use_it = if let Some(event_time) = cur_event_time {
                 v.time < event_time
             } else { true };
@@ -193,7 +181,7 @@ fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues], trades
         }
 
         if let Some(v) = values2.get(v_index2) {
-            let event = OrderBookEvent::Instrument2(*v);
+            let event = MarketEvent::OrderBook2(*v);
             let use_it = if let Some(event_time) = cur_event_time {
                 v.time < event_time
             } else { true };
@@ -204,7 +192,7 @@ fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues], trades
         }
 
         if let Some(t) = trades1.get(t_index1) {
-            let event = OrderBookEvent::Deal1(*t);
+            let event = MarketEvent::Deal1(*t);
             let use_it = if let Some(event_time) = cur_event_time {
                 t.created < event_time
             } else { true };
@@ -215,7 +203,7 @@ fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues], trades
         }
 
         if let Some(t) = trades2.get(t_index2) {
-            let event = OrderBookEvent::Deal2(*t);
+            let event = MarketEvent::Deal2(*t);
             let use_it = if let Some(event_time) = cur_event_time {
                 t.created < event_time
             } else { true };
@@ -227,10 +215,10 @@ fn merge_events(values1: &[OrderBookValues], values2: &[OrderBookValues], trades
         
         if let Some(event) = cur_event {
             match event {
-                OrderBookEvent::Instrument1(_) => v_index1 += 1,
-                OrderBookEvent::Instrument2(_) => v_index2 += 1,
-                OrderBookEvent::Deal1(_) => t_index1 += 1,
-                OrderBookEvent::Deal2(_) => t_index2 += 1,
+                MarketEvent::OrderBook1(_) => v_index1 += 1,
+                MarketEvent::OrderBook2(_) => v_index2 += 1,
+                MarketEvent::Deal1(_) => t_index1 += 1,
+                MarketEvent::Deal2(_) => t_index2 += 1,
             }
             events.push(event);
         } else {
@@ -272,9 +260,9 @@ fn find_nearest_order_book(time: DateTime<Utc>, order_books: &[OrderBook], prev_
 }
 
 #[derive(Copy, Clone, Debug)]
-enum OrderBookEvent {
-    Instrument1(OrderBookValues),
-    Instrument2(OrderBookValues),
+enum MarketEvent {
+    OrderBook1(OrderBookValues),
+    OrderBook2(OrderBookValues),
     Deal1(Trade),
     Deal2(Trade),
 }
