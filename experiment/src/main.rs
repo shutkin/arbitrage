@@ -1,5 +1,5 @@
 mod order_book_cache;
-mod signal_params;
+mod signal_optimization;
 mod math_utils;
 mod simulation;
 mod stats_collector;
@@ -7,7 +7,7 @@ mod deal;
 mod signals;
 
 use crate::math_utils::std_derivative;
-use crate::signal_params::{calibrate_params, CostFunctionImpl, IMBALANCE_LEVELS};
+use crate::signal_optimization::{calibrate_params, CostFunctionImpl, IMBALANCE_LEVELS};
 use crate::simulation::run_simulation_on_trades;
 use crate::stats_collector::compare_signals;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -44,7 +44,7 @@ async fn get_order_books(tickers: &[&str], ids: &[i16], diapason: TimeDiapason, 
 }
 
 #[tokio::main]
-async fn main() -> EmptyResult {
+async fn _main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -91,7 +91,7 @@ async fn main() -> EmptyResult {
 }
 
 #[tokio::main]
-async fn _main() -> EmptyResult {
+async fn main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -99,12 +99,12 @@ async fn _main() -> EmptyResult {
 
     let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
     let train_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-07T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-07T20:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
     );
     let test_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-08T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-08T20:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-04T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-04T20:00:00Z")?.to_utc(),
     );
 
     let all_instruments = db.get_instruments(false).await?;
@@ -123,8 +123,8 @@ async fn _main() -> EmptyResult {
         let events = merge_events(&all_values1, &all_values2, &[], &[]);
         info!("Total train events: {}", events.len());
 
-        let spearman_params = calibrate_params(&events, CostFunctionImpl::SpearmanCorrelation);
-        info!("{:?} {spearman_params:?}", CostFunctionImpl::SpearmanCorrelation);
+        let huber_params = calibrate_params(&events, CostFunctionImpl::HuberLoss);
+        info!("{:?} {huber_params:?}", CostFunctionImpl::HuberLoss);
 
         let trading_params = calibrate_params(&events, CostFunctionImpl::TradingSimulation);
         info!("{:?} {trading_params:?}", CostFunctionImpl::TradingSimulation);
@@ -143,9 +143,9 @@ async fn _main() -> EmptyResult {
         let events = merge_events(&all_values1, &all_values2, &trades1, &trades2);
         info!("Total test events: {}", events.len());
 
-        let result = run_simulation_on_trades(&events, &spearman_params, 10, false);
+        let result = run_simulation_on_trades(&events, &huber_params, 10, false);
         info!("{:?}. Deals {}. Income {}, outcome {}, commission {}, net profit {}",
-            CostFunctionImpl::SpearmanCorrelation,
+            CostFunctionImpl::HuberLoss,
             result.win + result.loss, result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);
         let result = run_simulation_on_trades(&events, &trading_params, 10, false);
         info!("{:?}. Deals {}. Income {}, outcome {}, commission {}, net profit {}",
@@ -264,6 +264,21 @@ enum MarketEvent {
     OrderBook2(OrderBookValues),
     Deal1(Trade),
     Deal2(Trade),
+}
+
+impl MarketEvent {
+    pub fn time(&self) -> DateTime<Utc> {
+        match self {
+            MarketEvent::OrderBook1(order_book) => order_book.time,
+            MarketEvent::OrderBook2(order_book) => order_book.time,
+            MarketEvent::Deal1(deal) => deal.created,
+            MarketEvent::Deal2(deal) => deal.created,
+        }
+    }
+}
+
+pub fn market_events_time_diapason(events: &[MarketEvent]) -> TimeDelta {
+    events[events.len() - 1].time() - events[0].time()
 }
 
 #[derive(Copy, Clone, Debug)]

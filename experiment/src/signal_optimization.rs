@@ -1,11 +1,12 @@
 use crate::deal::{Deal, DealDirection};
 use crate::simulation::{find_order_books_on_horizon, run_simulation};
-use crate::{MarketEvent, OrderBookValues};
+use crate::{market_events_time_diapason, MarketEvent, OrderBookValues};
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
 use chrono::TimeDelta;
 use log::{error, info};
 use ndarray::Array1;
+use crate::math_utils::huber_loss;
 
 pub const IMBALANCE_LEVELS: [usize; 4] = [3, 5, 10, 20];
 pub const DEFAULT_HOLD_MS: u16 = 250;
@@ -90,14 +91,54 @@ impl SignalParams {
 #[derive(Copy, Clone, Debug)]
 pub enum CostFunctionImpl {
     TradingSimulation,
-    SpearmanCorrelation,
+    SpearmanRanking,
+    HuberLoss,
 }
 
 impl CostFunctionImpl {
     fn optimize_threshold(&self) -> bool {
         match self {
             CostFunctionImpl::TradingSimulation => true,
-            CostFunctionImpl::SpearmanCorrelation => false,
+            CostFunctionImpl::SpearmanRanking => false,
+            CostFunctionImpl::HuberLoss => false,
+        }
+    }
+}
+
+struct HuberProblem<'a> {
+    direction: DealDirection,
+    events: &'a [MarketEvent],
+}
+
+impl CostFunction for HuberProblem<'_> {
+    type Param = Array1<f64>;
+    type Output = f64;
+
+    fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+        let dir_params = SignalParamsDir::from_array(p);
+        let params = match self.direction {
+            DealDirection::Sell1Buy2 => SignalParams {
+                hold_ms: DEFAULT_HOLD_MS,
+                up: Some(dir_params),
+                down: None,
+            },
+            DealDirection::Buy1Sell2 => SignalParams {
+                hold_ms: DEFAULT_HOLD_MS,
+                up: None,
+                down: Some(dir_params),
+            },
+        };
+        let (signal_values, pnl_values) = collect_signal_to_pnl_values(self.events, &params);
+        if signal_values.len() > 2 {
+            // delta - test profit
+            // 0.25 - 1040.2529049998134
+            // 0.5  - 1053.1584199998135
+            // 0.75 - 1053.1584199998135
+            // 1.0  - 1053.1584199998135
+            // 2.0  - 1043.9542499996273
+            Ok(huber_loss(&signal_values, &pnl_values, 0.75))
+        } else {
+            Err(Error::msg("Insufficient data"))
         }
     }
 }
@@ -218,7 +259,13 @@ fn optimize(events: &[MarketEvent], cost_function: CostFunctionImpl, direction: 
             .map(|result| {
                 (result.state().get_best_cost(), result.state().get_best_param().cloned().unwrap_or_default())
             }),
-        CostFunctionImpl::SpearmanCorrelation => Executor::new(SpearmanProblem {direction, events}, solver)
+        CostFunctionImpl::SpearmanRanking => Executor::new(SpearmanProblem {direction, events}, solver)
+            .configure(|state| state.max_iters(SOLVER_ITERATIONS))
+            .run()
+            .map(|result| {
+                (result.state().get_best_cost(), result.state().get_best_param().cloned().unwrap_or_default())
+            }),
+        CostFunctionImpl::HuberLoss => Executor::new(HuberProblem {direction, events}, solver)
             .configure(|state| state.max_iters(SOLVER_ITERATIONS))
             .run()
             .map(|result| {
@@ -296,32 +343,23 @@ fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, dir: Deal
         down: if matches!(dir, DealDirection::Buy1Sell2) {Some(params_dir)} else {None},
     };
     let (signal_values, pnl_values) = collect_signal_to_pnl_values(events, &params);
-    let (mut min_signal, mut max_signal) = (None, None);
+    let mut filtered_signal_values = Vec::new();
     for i in 0..signal_values.len() {
-        if pnl_values[i] > -100.0 {
+        if pnl_values[i] > -20.0 {
             let signal = signal_values[i];
-
-            if let Some(cur_min) = min_signal {
-                if signal < cur_min {
-                    min_signal = Some(signal);
-                }
-            } else {
-                min_signal = Some(signal);
-            }
-
-            if let Some(cur_max) = max_signal {
-                if signal > cur_max {
-                    max_signal = Some(signal);
-                }
-            } else {
-                max_signal = Some(signal);
-            }
+            filtered_signal_values.push(signal);
         }
     }
 
     const LEVELS: usize = 16384;
 
-    if let Some(min_signal) = min_signal && let Some(max_signal) = max_signal {
+    if filtered_signal_values.len() > 1000 {
+        let expected_deals = market_events_time_diapason(events).num_minutes() as u32 / 8;
+        info!("Expected deals {expected_deals}");
+
+        filtered_signal_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let min_signal = filtered_signal_values[expected_deals as usize];
+        let max_signal = filtered_signal_values[filtered_signal_values.len() - 1 - expected_deals as usize];
         info!("Signal min {min_signal} and max {max_signal}");
         let mut best_profit = f64::NAN;
         let mut best_threshold = 0.0;
@@ -336,7 +374,7 @@ fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, dir: Deal
                 down: if matches!(dir, DealDirection::Buy1Sell2) {Some(test_params_dir)} else {None},
             };
             let result = run_simulation(events, &test_params);
-            if result.win + result.loss > 100 {
+            if result.win + result.loss > expected_deals {
                 let net = result.income - result.outcome - result.commission;
                 if best_profit.is_nan() || net > best_profit {
                     best_profit = net;

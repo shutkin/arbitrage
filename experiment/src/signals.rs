@@ -1,4 +1,4 @@
-use crate::signal_params::{SignalParams, SignalParamsDir};
+use crate::signal_optimization::{SignalParams, SignalParamsDir};
 
 pub fn signal_unknown_09_03() -> SignalParams {
     SignalParams {
@@ -21,6 +21,14 @@ pub fn signal_trading_09_03() -> SignalParams {
         hold_ms: 250,
         up: Some(SignalParamsDir { threshold: 0.2547522778733997, derivative1_weight: 0.6949038114054679, derivative2_weight: -0.9057303615846245, imbalance1_weights: [-0.10815244921679153, 0.12745537768125242, -0.072765326617233, -0.15667621777685273], imbalance2_weights: [0.27400577190429587, 0.20629281130053412, 0.26508092744809547, 0.19087896572348007] }),
         down: Some(SignalParamsDir { threshold: 0.3538176827492965, derivative1_weight: 1.248250215505707, derivative2_weight: 0.034994861974296965, imbalance1_weights: [0.02523119472401536, 0.02778552090110408, 0.06188950199514828, -0.0007433019868860787], imbalance2_weights: [0.018583702866224686, 0.06159849818772836, 0.005187903327439373, 7.727467309923685e-5] })
+    }
+}
+
+pub fn signal_huber_09_03_delta_1_0() -> SignalParams {
+    SignalParams {
+        hold_ms: 250,
+        up: Some(SignalParamsDir { threshold: 1.3011023717267869, derivative1_weight: 0.04267893761391925, derivative2_weight: -0.11599996611406088, imbalance1_weights: [-0.07221005631954536, 0.006961322164538986, 0.10414821440993079, -0.1326659546657877], imbalance2_weights: [-0.05049269427066268, -0.07020349733266332, 0.17235551004480473, 0.0006473184705099834] }),
+        down: Some(SignalParamsDir { threshold: 2.8302148464103607, derivative1_weight: 0.06475688532032187, derivative2_weight: 0.21591625869620884, imbalance1_weights: [0.02851660121340537, 0.004996074894577659, 0.008461109978329199, -0.09788247751541859], imbalance2_weights: [-0.03010652839998628, -0.042150711164999945, 0.010418350930564667, 0.031766208132396404] })
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::deal::{Deal, DealDirection};
-use crate::signal_params::{DEFAULT_HOLD_MS, SignalParams, collect_signal_to_pnl_values};
+use crate::signal_optimization::{DEFAULT_HOLD_MS, SignalParams, collect_signal_to_pnl_values};
 use crate::signals::{signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
 use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
 use crate::{COMMISSION_RATIO, MarketEvent};

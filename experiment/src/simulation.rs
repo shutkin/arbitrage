@@ -1,5 +1,5 @@
 use crate::deal::{Deal, DealDirection};
-use crate::signal_params::{Signal, SignalParams};
+use crate::signal_optimization::{Signal, SignalParams};
 use crate::{COMMISSION_RATIO, MarketEvent, OrderBookValues};
 use chrono::{DateTime, TimeDelta, Utc};
 use correlation::spearmanr;
