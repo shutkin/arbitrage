@@ -3,7 +3,26 @@ use chrono::TimeDelta;
 
 pub const DEVIATION_MAX_VALUE: f64 = 100.0;
 
-fn standard_deviation(data: &[f64]) -> Option<f64> {
+pub fn mean(data: &[f64]) -> f64 {
+    data.iter().sum::<f64>() / data.len() as f64
+}
+
+pub fn median(data: &[f64]) -> f64 {
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if sorted.len() % 2 == 0 {
+        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) * 0.5
+    } else {
+        sorted[sorted.len() / 2]
+    }
+}
+
+pub fn positive_percentile(data: &[f64]) -> f64 {
+    let positive = data.iter().filter(|x| **x > 0.0).count() as f64;
+    100.0 * positive / data.len() as f64
+}
+
+pub fn standard_deviation(data: &[f64]) -> Option<f64> {
     let count = data.len();
     if count == 0 {
         return None;

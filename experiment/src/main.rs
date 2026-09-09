@@ -7,16 +7,16 @@ mod deal;
 mod signals;
 
 use crate::math_utils::std_derivative;
-use crate::signal_optimization::{calibrate_params, CostFunctionImpl, IMBALANCE_LEVELS};
+use crate::signal_optimization::{CostFunctionImpl, IMBALANCE_LEVELS};
+use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07};
 use crate::simulation::run_simulation_on_trades;
-use crate::stats_collector::compare_signals;
+use crate::stats_collector::signal_to_future_pnl_advances;
 use chrono::{DateTime, TimeDelta, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::info;
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::{Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
-use crate::signals::signal_spearman_09_07;
 
 const COMMISSION_RATIO: f64 = 0.015 / 100.0;
 
@@ -44,53 +44,6 @@ async fn get_order_books(tickers: &[&str], ids: &[i16], diapason: TimeDiapason, 
 }
 
 #[tokio::main]
-async fn _main() -> EmptyResult {
-    dotenv::dotenv().ok();
-    SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
-    let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
-    let db = db::Db::new(&db_url).await?;
-
-    let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
-    let train_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
-    );
-    let test_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-04T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-04T20:00:00Z")?.to_utc(),
-    );
-
-    let all_instruments = db.get_instruments(false).await?;
-    if let (Some(inst1_id), Some(inst2_id)) = (
-        find_instrument_id(&all_instruments, tickers[0]),
-        find_instrument_id(&all_instruments, tickers[1]),
-    ) {
-        let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
-
-        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], train_diapason, Some(&db)).await?;
-        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
-        info!("Calculate std deviations");
-        calculate_std_deviations(&mut all_values1);
-        calculate_std_deviations(&mut all_values2);
-
-        let events = merge_events(&all_values1, &all_values2, &[], &[]);
-        info!("Train Diapason:\n{}", compare_signals(&events));
-
-        let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
-
-        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], test_diapason, Some(&db)).await?;
-        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
-        info!("Calculate std deviations");
-        calculate_std_deviations(&mut all_values1);
-        calculate_std_deviations(&mut all_values2);
-
-        let events = merge_events(&all_values1, &all_values2, &[], &[]);
-        info!("Test Diapason:\n{}", compare_signals(&events));
-    }
-    Ok(())
-}
-
-#[tokio::main]
 async fn main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
@@ -99,12 +52,48 @@ async fn main() -> EmptyResult {
 
     let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
     let train_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-07T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-07T20:00:00Z")?.to_utc(),
     );
     let test_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-04T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-04T20:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-08T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-08T20:00:00Z")?.to_utc(),
+    );
+
+    let all_instruments = db.get_instruments(false).await?;
+    if let (Some(inst1_id), Some(inst2_id)) = (
+        find_instrument_id(&all_instruments, tickers[0]),
+        find_instrument_id(&all_instruments, tickers[1]),
+    ) {
+        let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
+        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], train_diapason, Some(&db)).await?;
+        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
+        info!("Calculate std deviations");
+        calculate_std_deviations(&mut all_values1);
+        calculate_std_deviations(&mut all_values2);
+
+        let events = merge_events(&all_values1, &all_values2, &[], &[]);
+        info!("{} events", events.len());
+        info!("Test Diapason:\n\n{}", signal_to_future_pnl_advances(&events).join("\n\n"));
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn _main() -> EmptyResult {
+    dotenv::dotenv().ok();
+    SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
+    let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
+    let db = db::Db::new(&db_url).await?;
+
+    let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
+    let train_diapason = TimeDiapason::new(
+        DateTime::parse_from_rfc3339("2026-09-07T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-07T20:00:00Z")?.to_utc(),
+    );
+    let test_diapason = TimeDiapason::new(
+        DateTime::parse_from_rfc3339("2026-09-08T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-08T20:00:00Z")?.to_utc(),
     );
 
     let all_instruments = db.get_instruments(false).await?;
@@ -123,10 +112,12 @@ async fn main() -> EmptyResult {
         let events = merge_events(&all_values1, &all_values2, &[], &[]);
         info!("Total train events: {}", events.len());
 
-        let huber_params = calibrate_params(&events, CostFunctionImpl::HuberLoss);
+        let spearman_params = signal_spearman_09_07();
+
+        let huber_params = signal_huber_09_07();// calibrate_params(&events, CostFunctionImpl::HuberLoss);
         info!("{:?} {huber_params:?}", CostFunctionImpl::HuberLoss);
 
-        let trading_params = calibrate_params(&events, CostFunctionImpl::TradingSimulation);
+        let trading_params = signal_trading_09_07();// calibrate_params(&events, CostFunctionImpl::TradingSimulation);
         info!("{:?} {trading_params:?}", CostFunctionImpl::TradingSimulation);
 
         info!("Test on {test_diapason:?}");
@@ -143,6 +134,10 @@ async fn main() -> EmptyResult {
         let events = merge_events(&all_values1, &all_values2, &trades1, &trades2);
         info!("Total test events: {}", events.len());
 
+        let result = run_simulation_on_trades(&events, &spearman_params, 10, false);
+        info!("{:?}. Deals {}. Income {}, outcome {}, commission {}, net profit {}",
+            CostFunctionImpl::SpearmanRanking,
+            result.win + result.loss, result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);
         let result = run_simulation_on_trades(&events, &huber_params, 10, false);
         info!("{:?}. Deals {}. Income {}, outcome {}, commission {}, net profit {}",
             CostFunctionImpl::HuberLoss,

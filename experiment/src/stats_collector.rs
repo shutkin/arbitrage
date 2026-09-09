@@ -1,6 +1,7 @@
 use crate::deal::{Deal, DealDirection};
-use crate::signal_optimization::{DEFAULT_HOLD_MS, SignalParams, collect_signal_to_pnl_values};
-use crate::signals::{signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
+use crate::math_utils::{mean, median, positive_percentile, standard_deviation};
+use crate::signal_optimization::{DEFAULT_HOLD_MS, SignalParams, SignalPnL, collect_signal_to_pnl_values};
+use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
 use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
 use crate::{COMMISSION_RATIO, MarketEvent};
 use chrono::TimeDelta;
@@ -204,7 +205,71 @@ pub fn signal_after_deal(events: &[MarketEvent], params: SignalParams) -> String
     collect_to_table(&mut runner)
 }
 
-pub fn compare_signals(events: &[MarketEvent]) -> String {
+pub fn signal_to_future_pnl_advances(events: &[MarketEvent]) -> Vec<String> {
+    struct Runner {
+        pub values: SignalPnL,
+        pub signal_sorted: Vec<f64>,
+    }
+
+    const PERCENTILES: [f64; 15] = [50.0, 20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
+
+    impl StatisticsProvider for Runner {
+        fn variants(&self) -> Vec<String> {
+            vec!["N".to_string(), "mean PnL".to_string(), "median PnL".to_string(),
+                 "std PnL".to_string(), "win rate".to_string(), "Signal threshold".to_string(),]
+        }
+
+        fn run(&mut self, variant: u8) -> Vec<(String, String)> {
+            PERCENTILES.iter().map(|percentile| {
+                let offset_from_top = (self.signal_sorted.len() as f64 * percentile / 100.0).round() as usize;
+                let threshold = self.signal_sorted[self.signal_sorted.len() - 1 - offset_from_top];
+                let mut pnl_values = Vec::new();
+                for (i, signal) in self.values.signal.iter().enumerate() {
+                    if *signal >= threshold {
+                        pnl_values.push(self.values.pnl[i] - self.values.commission[i]);
+                    }
+                }
+                let percentile_str = format!("{}%", percentile);
+                let v = match variant {
+                    0 => format!("{}", pnl_values.len()),
+                    1 => format!("{:.3}", mean(&pnl_values)),
+                    2 => format!("{:.3}", median(&pnl_values)),
+                    3 => format!("{:.3}", standard_deviation(&pnl_values).unwrap_or_default()),
+                    4 => format!("{:.3}", positive_percentile(&pnl_values)),
+                    _ => format!("{:.6}", threshold),
+                };
+                (percentile_str, v)
+            }).collect()
+        }
+    }
+    
+    let mut result = Vec::new();
+
+    let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: signal_trading_09_07().up, down: None};
+    let values = collect_signal_to_pnl_values(events, &params);
+    let mut signal_sorted = values.signal.clone();
+    signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut runner = Runner {values, signal_sorted};
+    result.push(collect_to_table(&mut runner));
+    
+    let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: signal_spearman_09_07().up, down: None};
+    let values = collect_signal_to_pnl_values(events, &params);
+    let mut signal_sorted = values.signal.clone();
+    signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut runner = Runner {values, signal_sorted};
+    result.push(collect_to_table(&mut runner));
+    
+    let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: signal_huber_09_07().up, down: None};
+    let values = collect_signal_to_pnl_values(events, &params);
+    let mut signal_sorted = values.signal.clone();
+    signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut runner = Runner {values, signal_sorted};
+    result.push(collect_to_table(&mut runner));
+    
+    result
+}
+
+pub fn signal_to_future_pnl_relation(events: &[MarketEvent]) -> String {
     struct Runner<'a> {
         pub events: &'a [MarketEvent],
     }
@@ -212,7 +277,8 @@ pub fn compare_signals(events: &[MarketEvent]) -> String {
     impl StatisticsProvider for Runner<'_> {
         fn variants(&self) -> Vec<String> {
             vec!["simulation UP".to_string(), "simulation DOWN".to_string(),
-                 "Spearman UP".to_string(), "Spearman DOWN".to_string()]
+                 "Spearman UP".to_string(), "Spearman DOWN".to_string(),
+                 "Huber UP".to_string(), "Huber DOWN".to_string()]
         }
 
         fn run(&mut self, variant: u8) -> Vec<(String, String)> {
@@ -221,14 +287,16 @@ pub fn compare_signals(events: &[MarketEvent]) -> String {
                 1 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: None, down: signal_trading_09_07().down },
                 2 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: signal_spearman_09_07().up, down: None },
                 3 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: None, down: signal_spearman_09_07().down },
+                4 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: signal_huber_09_07().up, down: None },
+                5 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: None, down: signal_huber_09_07().down },
                 _ => signal_unknown_09_03(),
             };
-            let (signal, pnl) = collect_signal_to_pnl_values(self.events, &params);
-            if signal.len() < 100 {
+            let values = collect_signal_to_pnl_values(self.events, &params);
+            if values.signal.len() < 100 {
                 return (0..20).map(|i| (i.to_string(), "-".to_string())).collect();
             }
 
-            let mut s = signal.clone();
+            let mut s = values.signal.clone();
             s.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let min = s[s.len() / 10];
             let max = s[s.len() * 9 / 10];
@@ -236,16 +304,23 @@ pub fn compare_signals(events: &[MarketEvent]) -> String {
             (0..20).map(|i| (i, min + (max - min) * i as f64 / 20.0 .. min + (max - min) * (i + 1) as f64 / 20.0))
                 .map(|(index, range)| {
                     let mut signal_pnl = Vec::new();
-                    for (i, signal) in signal.iter().enumerate() {
+                    let (mut win, mut loss) = (0, 0);
+                    for (i, signal) in values.signal.iter().enumerate() {
                         if range.contains(signal) {
-                            signal_pnl.push(pnl[i]);
+                            signal_pnl.push(values.pnl[i]);
+                            if values.pnl[i] > 0.0 {
+                                win += 1;
+                            } else {
+                                loss += 1;
+                            }
                         }
                     }
                     signal_pnl.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     let mean = signal_pnl.iter().sum::<f64>() / signal_pnl.len() as f64;
                     let p25 = signal_pnl[signal_pnl.len() / 4];
                     let p75 = signal_pnl[signal_pnl.len() * 3 / 4];
-                    (index.to_string(), format!("{:.3} ({:.3} - {:.3})", mean, p25, p75))
+                    let win_loss = 100.0 * win as f64 / (win + loss) as f64;
+                    (index.to_string(), format!("{:.3} ({:.3} - {:.3}) {:.2}% {}", mean, p25, p75, win_loss, win + loss))
                 }).collect()
         }
     }
