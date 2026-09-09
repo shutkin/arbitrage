@@ -1,10 +1,11 @@
 use crate::deal::{Deal, DealDirection};
-use crate::signal_params::SignalParams;
+use crate::signal_params::{DEFAULT_HOLD_MS, SignalParams, collect_signal_to_pnl_values};
+use crate::signals::{signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
 use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
 use crate::{COMMISSION_RATIO, MarketEvent};
+use chrono::TimeDelta;
 use log::info;
 use std::collections::HashMap;
-use chrono::TimeDelta;
 
 pub trait StatisticsProvider {
     fn variants(&self) -> Vec<String>;
@@ -200,5 +201,55 @@ pub fn signal_after_deal(events: &[MarketEvent], params: SignalParams) -> String
         deal_handler: &mut handler,
     };
 
+    collect_to_table(&mut runner)
+}
+
+pub fn compare_signals(events: &[MarketEvent]) -> String {
+    struct Runner<'a> {
+        pub events: &'a [MarketEvent],
+    }
+
+    impl StatisticsProvider for Runner<'_> {
+        fn variants(&self) -> Vec<String> {
+            vec!["simulation UP".to_string(), "simulation DOWN".to_string(),
+                 "Spearman UP".to_string(), "Spearman DOWN".to_string()]
+        }
+
+        fn run(&mut self, variant: u8) -> Vec<(String, String)> {
+            let params = match variant {
+                0 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: signal_trading_09_07().up, down: None },
+                1 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: None, down: signal_trading_09_07().down },
+                2 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: signal_spearman_09_07().up, down: None },
+                3 => SignalParams { hold_ms: DEFAULT_HOLD_MS, up: None, down: signal_spearman_09_07().down },
+                _ => signal_unknown_09_03(),
+            };
+            let (signal, pnl) = collect_signal_to_pnl_values(self.events, &params);
+            if signal.len() < 100 {
+                return (0..20).map(|i| (i.to_string(), "-".to_string())).collect();
+            }
+
+            let mut s = signal.clone();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let min = s[s.len() / 10];
+            let max = s[s.len() * 9 / 10];
+
+            (0..20).map(|i| (i, min + (max - min) * i as f64 / 20.0 .. min + (max - min) * (i + 1) as f64 / 20.0))
+                .map(|(index, range)| {
+                    let mut signal_pnl = Vec::new();
+                    for (i, signal) in signal.iter().enumerate() {
+                        if range.contains(signal) {
+                            signal_pnl.push(pnl[i]);
+                        }
+                    }
+                    signal_pnl.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let mean = signal_pnl.iter().sum::<f64>() / signal_pnl.len() as f64;
+                    let p25 = signal_pnl[signal_pnl.len() / 4];
+                    let p75 = signal_pnl[signal_pnl.len() * 3 / 4];
+                    (index.to_string(), format!("{:.3} ({:.3} - {:.3})", mean, p25, p75))
+                }).collect()
+        }
+    }
+
+    let mut runner = Runner { events };
     collect_to_table(&mut runner)
 }

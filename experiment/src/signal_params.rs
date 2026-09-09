@@ -4,11 +4,11 @@ use crate::{MarketEvent, OrderBookValues};
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
 use chrono::TimeDelta;
-use log::{info, warn};
+use log::{error, info};
 use ndarray::Array1;
 
 pub const IMBALANCE_LEVELS: [usize; 4] = [3, 5, 10, 20];
-const DEFAULT_HOLD_MS: u16 = 250;
+pub const DEFAULT_HOLD_MS: u16 = 250;
 const SOLVER_ITERATIONS: u64 = 8192;
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -22,12 +22,22 @@ pub struct SignalParamsDir {
 
 impl SignalParamsDir {
     pub fn from_array(array: &Array1<f64>) -> Self {
-        Self {
-            threshold: 0.0,
-            derivative1_weight: array[0].max(0.0),
-            derivative2_weight: array[1],
-            imbalance1_weights: [array[2], array[3], array[4], array[5]],
-            imbalance2_weights: [array[6], array[7], array[8], array[9]],
+        if array.len() == 10 {
+            Self {
+                threshold: 0.0,
+                derivative1_weight: array[0].max(0.0),
+                derivative2_weight: array[1],
+                imbalance1_weights: [array[2], array[3], array[4], array[5]],
+                imbalance2_weights: [array[6], array[7], array[8], array[9]],
+            }
+        } else {
+            Self {
+                threshold: array[0],
+                derivative1_weight: array[1].max(0.0),
+                derivative2_weight: array[2],
+                imbalance1_weights: [array[3], array[4], array[5], array[6]],
+                imbalance2_weights: [array[7], array[8], array[9], array[10]],
+            }
         }
     }
 }
@@ -77,12 +87,27 @@ impl SignalParams {
     }
 }
 
-struct TradingProblem<'a> {
+#[derive(Copy, Clone, Debug)]
+pub enum CostFunctionImpl {
+    TradingSimulation,
+    SpearmanCorrelation,
+}
+
+impl CostFunctionImpl {
+    fn optimize_threshold(&self) -> bool {
+        match self {
+            CostFunctionImpl::TradingSimulation => true,
+            CostFunctionImpl::SpearmanCorrelation => false,
+        }
+    }
+}
+
+struct SpearmanProblem<'a> {
     direction: DealDirection,
     events: &'a [MarketEvent],
 }
 
-impl CostFunction for TradingProblem<'_> {
+impl CostFunction for SpearmanProblem<'_> {
     type Param = Array1<f64>;
     type Output = f64;
 
@@ -109,7 +134,120 @@ impl CostFunction for TradingProblem<'_> {
     }
 }
 
-fn collect_signal_to_pnl_values(events: &[MarketEvent], params: &SignalParams) -> (Vec<f64>, Vec<f64>) {
+struct TradingProblem<'a> {
+    direction: DealDirection,
+    events: &'a [MarketEvent],
+}
+
+impl CostFunction for TradingProblem<'_> {
+    type Param = Array1<f64>;
+    type Output = f64;
+
+    fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+        let dir_params = SignalParamsDir::from_array(p);
+        let params = match self.direction {
+            DealDirection::Sell1Buy2 => SignalParams {
+                hold_ms: DEFAULT_HOLD_MS,
+                up: Some(dir_params),
+                down: None,
+            },
+            DealDirection::Buy1Sell2 => SignalParams {
+                hold_ms: DEFAULT_HOLD_MS,
+                up: None,
+                down: Some(dir_params),
+            },
+        };
+        let results = run_simulation(self.events, &params);
+        let gross = results.income - results.outcome;
+        Ok(-gross)
+    }
+}
+
+pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl) -> SignalParams {
+    let initial = Array1::from_vec(
+        if cost_function.optimize_threshold() {
+            //   A    D1   D2   I3   I5   I10  I20  I3   I5   I10  I20
+            vec![3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        } else {
+            //   D1   D2   I3   I5   I10  I20  I3   I5   I10  I20
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        },
+    );
+
+    let mut simplex = Vec::with_capacity(initial.len() + 1);
+
+    simplex.push(initial.clone());
+
+    for i in 0..initial.len() {
+        let mut point = initial.clone();
+        if cost_function.optimize_threshold() {
+            point[i] += match i {
+                0 => 1.0,      // A
+                1 | 2 => 0.2,  // D1, D2
+                _ => 0.1,      // Imbalance
+            };
+        } else {
+            point[i] += match i {
+                0 | 1 => 0.2,  // D1, D2
+                _ => 0.1,      // Imbalance
+            };
+        }
+        simplex.push(point);
+    }
+
+    let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
+    info!("Start optimization UP");
+    let params_up = optimize(events, cost_function, DealDirection::Sell1Buy2, solver);
+
+    let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
+    info!("Start optimization DOWN");
+    let params_down = optimize(events, cost_function, DealDirection::Buy1Sell2, solver);
+
+    SignalParams {
+        hold_ms: DEFAULT_HOLD_MS,
+        up: params_up,
+        down: params_down,
+    }
+}
+
+fn optimize(events: &[MarketEvent], cost_function: CostFunctionImpl, direction: DealDirection, solver: NelderMead<Array1<f64>, f64>) -> Option<SignalParamsDir> {
+    let executor_result = match cost_function {
+        CostFunctionImpl::TradingSimulation => Executor::new(TradingProblem {direction, events}, solver)
+            .configure(|state| state.max_iters(SOLVER_ITERATIONS))
+            .run()
+            .map(|result| {
+                (result.state().get_best_cost(), result.state().get_best_param().cloned().unwrap_or_default())
+            }),
+        CostFunctionImpl::SpearmanCorrelation => Executor::new(SpearmanProblem {direction, events}, solver)
+            .configure(|state| state.max_iters(SOLVER_ITERATIONS))
+            .run()
+            .map(|result| {
+                (result.state().get_best_cost(), result.state().get_best_param().cloned().unwrap_or_default())
+            }),
+    };
+    let mut params = match executor_result {
+        Ok((cost, params)) => {
+            let params = SignalParamsDir::from_array(&params);
+            info!("Best result {} with {params:?}", -cost);
+            params
+        },
+        Err(e) => {
+            error!("{e}");
+            return None;
+        },
+    };
+    if params.imbalance1_weights.iter().any(|w| w.abs() > f64::MIN_POSITIVE) &&
+        params.imbalance2_weights.iter().any(|w| w.abs() > f64::MIN_POSITIVE) {
+        if !cost_function.optimize_threshold() && let Some(threshold) = find_threshold(events, params, direction) {
+            params.threshold = threshold;
+        }
+        Some(params)
+    } else {
+        None
+    }
+}
+
+pub fn collect_signal_to_pnl_values(events: &[MarketEvent], params: &SignalParams) -> (Vec<f64>, Vec<f64>) {
     let mut signal_values = Vec::new();
     let mut pnl_values = Vec::new();
     let (mut last_order_book1, mut last_order_book2) = (None, None);
@@ -151,88 +289,16 @@ fn collect_signal_to_pnl_values(events: &[MarketEvent], params: &SignalParams) -
     (signal_values, pnl_values)
 }
 
-pub fn calibrate_params(events: &[MarketEvent]) -> SignalParams {
-    let initial = Array1::from_vec(vec![
-      //D1   D2   I3   I5   I10  I20  I3   I5   I10  I20
-        1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    ]);
-
-    let mut simplex = Vec::with_capacity(initial.len() + 1);
-
-    simplex.push(initial.clone());
-
-    for i in 0..initial.len() {
-        let mut point = initial.clone();
-        point[i] += match i {
-            0 | 1 => 0.2,  // D1, D2
-            _ => 0.1,      // Imbalance
-        };
-        simplex.push(point);
-    }
-
-    let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
-    let trade_problem = TradingProblem {
-        direction: DealDirection::Sell1Buy2,
-        events,
-    };
-    info!("Start optimization UP");
-    let mut params_up = match Executor::new(trade_problem, solver)
-        .configure(|state| state.max_iters(SOLVER_ITERATIONS))
-        .run() {
-        Ok(result) => {
-            let best_cost = result.state().get_best_cost();
-            let params = SignalParamsDir::from_array(result.state().get_best_param().unwrap());
-            info!("Best UP correlation {} with {params:?}", -best_cost);
-            params
-        },
-        Err(e) => panic!("{e}"),
-    };
-    if let Some(threshold) = find_threshold(events, params_up, true) {
-        params_up.threshold = threshold;
-    } else {
-        warn!("No threshold {:?}", params_up);
-    }
-
-    let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
-    let trade_problem = TradingProblem {
-        direction: DealDirection::Buy1Sell2,
-        events,
-    };
-    info!("Start optimization DOWN");
-    let mut params_down = match Executor::new(trade_problem, solver)
-        .configure(|state| state.max_iters(SOLVER_ITERATIONS))
-        .run() {
-        Ok(result) => {
-            let best_cost = result.state().get_best_cost();
-            let params = SignalParamsDir::from_array(result.state().get_best_param().unwrap());
-            info!("Best DOWN correlation {} with {params:?}", -best_cost);
-            params
-        },
-        Err(e) => panic!("{e}"),
-    };
-    if let Some(threshold) = find_threshold(events, params_down, false) {
-        params_down.threshold = threshold;
-    } else {
-        warn!("No threshold {:?}", params_down);
-    }
-
-    SignalParams {
-        hold_ms: DEFAULT_HOLD_MS,
-        up: Some(params_up),
-        down: Some(params_down),
-    }
-}
-
-fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, is_up: bool) -> Option<f64> {
+fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, dir: DealDirection) -> Option<f64> {
     let params = SignalParams {
         hold_ms: DEFAULT_HOLD_MS,
-        up: if is_up {Some(params_dir)} else {None},
-        down: if !is_up {Some(params_dir)} else {None},
+        up: if matches!(dir, DealDirection::Sell1Buy2) {Some(params_dir)} else {None},
+        down: if matches!(dir, DealDirection::Buy1Sell2) {Some(params_dir)} else {None},
     };
     let (signal_values, pnl_values) = collect_signal_to_pnl_values(events, &params);
     let (mut min_signal, mut max_signal) = (None, None);
     for i in 0..signal_values.len() {
-        if pnl_values[i] > 0.0 {
+        if pnl_values[i] > -100.0 {
             let signal = signal_values[i];
 
             if let Some(cur_min) = min_signal {
@@ -253,7 +319,7 @@ fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, is_up: bo
         }
     }
 
-    const LEVELS: usize = 8192;
+    const LEVELS: usize = 16384;
 
     if let Some(min_signal) = min_signal && let Some(max_signal) = max_signal {
         info!("Signal min {min_signal} and max {max_signal}");
@@ -266,8 +332,8 @@ fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, is_up: bo
             test_params_dir.threshold = threshold;
             let test_params = SignalParams {
                 hold_ms: DEFAULT_HOLD_MS,
-                up: if is_up {Some(test_params_dir)} else {None},
-                down: if !is_up {Some(test_params_dir)} else {None},
+                up: if matches!(dir, DealDirection::Sell1Buy2) {Some(test_params_dir)} else {None},
+                down: if matches!(dir, DealDirection::Buy1Sell2) {Some(test_params_dir)} else {None},
             };
             let result = run_simulation(events, &test_params);
             if result.win + result.loss > 100 {
