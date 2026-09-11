@@ -1,10 +1,10 @@
 use crate::deal::{Deal, DealDirection};
 use crate::math_utils::{mean, median, positive_percentile, standard_deviation};
-use crate::signal_optimization::{DEFAULT_HOLD_MS, SignalParams, SignalPnL, collect_signal_to_pnl_values};
+use crate::signal_optimization::{calibrate_params, collect_signal_to_pnl_values, SignalParams, SignalPnL, DEFAULT_HOLD_MS, CostFunctionImpl};
 use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
 use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
-use crate::{COMMISSION_RATIO, MarketEvent};
-use chrono::TimeDelta;
+use crate::{commission, MarketEvent};
+use chrono::{TimeDelta, Timelike};
 use log::info;
 use std::collections::HashMap;
 
@@ -59,7 +59,7 @@ pub fn threshold_horizon_probabilities(events: &[MarketEvent], params: SignalPar
                         }
                     }
                     let (_, revenue, cost) = deal_copy.close(false);
-                    let commission = (revenue + cost) * COMMISSION_RATIO;
+                    let commission = commission(revenue, cost);
                     self.map.get_mut(&horizon).unwrap().push(revenue - cost > commission);
                 }
             }
@@ -205,13 +205,104 @@ pub fn signal_after_deal(events: &[MarketEvent], params: SignalParams) -> String
     collect_to_table(&mut runner)
 }
 
-pub fn signal_to_future_pnl_advances(events: &[MarketEvent]) -> Vec<String> {
+pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>) -> String {
+    const PERCENTILES: [f64; 5] = [0.05, 0.02, 0.01, 0.005, 0.002];
+
     struct Runner {
-        pub values: SignalPnL,
-        pub signal_sorted: Vec<f64>,
+        day_titles: Vec<String>,
+        values: Vec<SignalPnL>,
+        signal_sorted: Vec<Vec<f64>>,
     }
 
+    impl Runner {
+        pub fn new(daily_events: Vec<Vec<MarketEvent>>) -> Self {
+            let mut day_titles = Vec::new();
+            let mut daily_values = Vec::new();
+            let mut daily_signal_sorted = Vec::new();
+
+            for i in 1..daily_events.len() {
+                let mut train_events = Vec::new();
+                for back in 0..3 {
+                    let train_day = i as i32 + back - 3;
+                    if train_day >= 0 {
+                        train_events.extend_from_slice(&daily_events[train_day as usize]);
+                    }
+                }
+                day_titles.push(format!("{}", daily_events[i][0].event_datetime().date_naive()));
+
+                let params = calibrate_params(&train_events, CostFunctionImpl::HuberLoss);
+                let values = collect_signal_to_pnl_values(&daily_events[i], &params);
+                let mut signal_sorted = values.signal.clone();
+                signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                daily_values.push(values);
+                daily_signal_sorted.push(signal_sorted);
+            }
+
+            Self {
+                day_titles,
+                values: daily_values,
+                signal_sorted: daily_signal_sorted,
+            }
+        }
+    }
+
+    impl StatisticsProvider for Runner {
+        fn variants(&self) -> Vec<String> {
+            PERCENTILES.iter().flat_map(|p| vec![format!("{p}% total PnL"), format!("{p}% median PnL"), format!("{p}% win rate")]).collect()
+        }
+
+        fn run(&mut self, variant: u8) -> Vec<(String, String)> {
+            let mut result = Vec::new();
+            for (day, (values, signal_sorted)) in self.values.iter().zip(self.signal_sorted.iter()).enumerate() {
+                let percentile = PERCENTILES[variant as usize / 3];
+                let offset_from_top = (signal_sorted.len() as f64 * percentile / 100.0).round() as usize;
+                let threshold = signal_sorted[signal_sorted.len() - 1 - offset_from_top];
+                let mut pnl_values = Vec::new();
+                for (i, signal) in values.signal.iter().enumerate() {
+                    if *signal >= threshold {
+                        pnl_values.push(values.pnl[i] - values.commission[i]);
+                    }
+                }
+                let date = self.day_titles[day].clone();
+                let v = match variant % 3 {
+                    0 => format!("{:.3}", pnl_values.iter().sum::<f64>()),
+                    1 => format!("{:.3}", median(&pnl_values)),
+                    _ => format!("{:.2}%", positive_percentile(&pnl_values)),
+                };
+                result.push((date, v));
+            }
+            result
+        }
+    }
+
+    let mut runner = Runner::new(daily_events);
+    collect_to_table(&mut runner)
+}
+
+pub fn signal_to_future_pnl_advances(train_events: &[MarketEvent], test_events: &[MarketEvent]) -> Vec<String> {
     const PERCENTILES: [f64; 15] = [50.0, 20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
+
+    struct Runner {
+        values: [SignalPnL; 2],
+        signal_sorted: [Vec<f64>; 2],
+    }
+
+    impl Runner {
+        pub fn new(train_events: &[MarketEvent], test_events: &[MarketEvent], params: &SignalParams) -> Self {
+            let train_values = collect_signal_to_pnl_values(train_events, &params);
+            let mut train_signal_sorted = train_values.signal.clone();
+            train_signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+            let test_values = collect_signal_to_pnl_values(test_events, &params);
+            let mut test_signal_sorted = test_values.signal.clone();
+            test_signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+            Self {
+                values: [train_values, test_values],
+                signal_sorted: [train_signal_sorted, test_signal_sorted],
+            }
+        }
+    }
 
     impl StatisticsProvider for Runner {
         fn variants(&self) -> Vec<String> {
@@ -221,22 +312,27 @@ pub fn signal_to_future_pnl_advances(events: &[MarketEvent]) -> Vec<String> {
 
         fn run(&mut self, variant: u8) -> Vec<(String, String)> {
             PERCENTILES.iter().map(|percentile| {
-                let offset_from_top = (self.signal_sorted.len() as f64 * percentile / 100.0).round() as usize;
-                let threshold = self.signal_sorted[self.signal_sorted.len() - 1 - offset_from_top];
-                let mut pnl_values = Vec::new();
-                for (i, signal) in self.values.signal.iter().enumerate() {
-                    if *signal >= threshold {
-                        pnl_values.push(self.values.pnl[i] - self.values.commission[i]);
+                let mut threshold = [0.0, 0.0];
+                let mut pnl_values = [Vec::new(), Vec::new()];
+                for data_set in 0..2 {
+                    let offset_from_top = (self.signal_sorted[data_set].len() as f64 * percentile / 100.0).round() as usize;
+                    threshold[data_set] = self.signal_sorted[data_set][self.signal_sorted[data_set].len() - 1 - offset_from_top];
+
+                    for (i, signal) in self.values[data_set].signal.iter().enumerate() {
+                        if *signal >= threshold[data_set] {
+                            pnl_values[data_set].push(self.values[data_set].pnl[i] - self.values[data_set].commission[i]);
+                        }
                     }
                 }
+
                 let percentile_str = format!("{}%", percentile);
                 let v = match variant {
-                    0 => format!("{}", pnl_values.len()),
-                    1 => format!("{:.3}", mean(&pnl_values)),
-                    2 => format!("{:.3}", median(&pnl_values)),
-                    3 => format!("{:.3}", standard_deviation(&pnl_values).unwrap_or_default()),
-                    4 => format!("{:.3}", positive_percentile(&pnl_values)),
-                    _ => format!("{:.6}", threshold),
+                    0 => format!("{} / {}", pnl_values[0].len(), pnl_values[1].len()),
+                    1 => format!("{:.3} / {:.3}", mean(&pnl_values[0]), mean(&pnl_values[1])),
+                    2 => format!("{:.3} / {:.3}", median(&pnl_values[0]), median(&pnl_values[1])),
+                    3 => format!("{:.3} / {:.3}", standard_deviation(&pnl_values[0]).unwrap_or_default(), standard_deviation(&pnl_values[1]).unwrap_or_default()),
+                    4 => format!("{:.3} / {:.3}", positive_percentile(&pnl_values[0]), positive_percentile(&pnl_values[1])),
+                    _ => format!("{:.4} / {:.4}", threshold[0], threshold[1]),
                 };
                 (percentile_str, v)
             }).collect()
@@ -245,25 +341,16 @@ pub fn signal_to_future_pnl_advances(events: &[MarketEvent]) -> Vec<String> {
     
     let mut result = Vec::new();
 
-    let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: signal_trading_09_07().up, down: None};
-    let values = collect_signal_to_pnl_values(events, &params);
-    let mut signal_sorted = values.signal.clone();
-    signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mut runner = Runner {values, signal_sorted};
+    let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: None, down: signal_trading_09_07().down};
+    let mut runner = Runner::new(train_events, test_events, &params);
     result.push(collect_to_table(&mut runner));
     
-    let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: signal_spearman_09_07().up, down: None};
-    let values = collect_signal_to_pnl_values(events, &params);
-    let mut signal_sorted = values.signal.clone();
-    signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mut runner = Runner {values, signal_sorted};
-    result.push(collect_to_table(&mut runner));
+    //let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: signal_spearman_09_07().up, down: None};
+    //let mut runner = Runner::new(train_events, test_events, &params);
+    //result.push(collect_to_table(&mut runner));
     
-    let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: signal_huber_09_07().up, down: None};
-    let values = collect_signal_to_pnl_values(events, &params);
-    let mut signal_sorted = values.signal.clone();
-    signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mut runner = Runner {values, signal_sorted};
+    let params = SignalParams {hold_ms: DEFAULT_HOLD_MS, up: None, down: signal_huber_09_07().down};
+    let mut runner = Runner::new(train_events, test_events, &params);
     result.push(collect_to_table(&mut runner));
     
     result

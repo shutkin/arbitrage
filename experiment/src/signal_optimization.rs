@@ -1,15 +1,16 @@
 use crate::deal::{Deal, DealDirection};
+use crate::math_utils::huber_loss;
 use crate::simulation::{find_order_books_on_horizon, run_simulation};
-use crate::{market_events_time_diapason, MarketEvent, OrderBookValues, COMMISSION_RATIO};
+use crate::{market_events_time_diapason, MarketEvent, OrderBookValues, commission};
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
 use chrono::TimeDelta;
 use log::{error, info};
 use ndarray::Array1;
-use crate::math_utils::huber_loss;
 
 pub const IMBALANCE_LEVELS: [usize; 4] = [3, 5, 10, 20];
-pub const DEFAULT_HOLD_MS: u16 = 250;
+
+pub const DEFAULT_HOLD_MS: u16 = 500;
 const SOLVER_ITERATIONS: u64 = 8192;
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -115,19 +116,7 @@ impl CostFunction for HuberProblem<'_> {
     type Output = f64;
 
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
-        let dir_params = SignalParamsDir::from_array(p);
-        let params = match self.direction {
-            DealDirection::Sell1Buy2 => SignalParams {
-                hold_ms: DEFAULT_HOLD_MS,
-                up: Some(dir_params),
-                down: None,
-            },
-            DealDirection::Buy1Sell2 => SignalParams {
-                hold_ms: DEFAULT_HOLD_MS,
-                up: None,
-                down: Some(dir_params),
-            },
-        };
+        let params = create_params_for_direction(p, self.direction);
         let values = collect_signal_to_pnl_values(self.events, &params);
         if values.signal.len() > 2 {
             Ok(huber_loss(&values.signal, &values.pnl, 0.75))
@@ -147,19 +136,7 @@ impl CostFunction for SpearmanProblem<'_> {
     type Output = f64;
 
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
-        let dir_params = SignalParamsDir::from_array(p);
-        let params = match self.direction {
-            DealDirection::Sell1Buy2 => SignalParams {
-                hold_ms: DEFAULT_HOLD_MS,
-                up: Some(dir_params),
-                down: None,
-            },
-            DealDirection::Buy1Sell2 => SignalParams {
-                hold_ms: DEFAULT_HOLD_MS,
-                up: None,
-                down: Some(dir_params),
-            },
-        };
+        let params = create_params_for_direction(p, self.direction);
         let values = collect_signal_to_pnl_values(self.events, &params);
         if values.signal.len() > 2 {
             Ok(-correlation::spearmanr(&values.pnl, &values.signal))
@@ -179,22 +156,26 @@ impl CostFunction for TradingProblem<'_> {
     type Output = f64;
 
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
-        let dir_params = SignalParamsDir::from_array(p);
-        let params = match self.direction {
-            DealDirection::Sell1Buy2 => SignalParams {
-                hold_ms: DEFAULT_HOLD_MS,
-                up: Some(dir_params),
-                down: None,
-            },
-            DealDirection::Buy1Sell2 => SignalParams {
-                hold_ms: DEFAULT_HOLD_MS,
-                up: None,
-                down: Some(dir_params),
-            },
-        };
+        let params = create_params_for_direction(p, self.direction);
         let results = run_simulation(self.events, &params);
-        let gross = results.income - results.outcome;
-        Ok(-gross)
+        let net = results.income - results.outcome - results.commission;
+        Ok(-net)
+    }
+}
+
+fn create_params_for_direction(p: &Array1<f64>, direction: DealDirection) -> SignalParams {
+    let dir_params = SignalParamsDir::from_array(p);
+    match direction {
+        DealDirection::Sell1Buy2 => SignalParams {
+            hold_ms: DEFAULT_HOLD_MS,
+            up: Some(dir_params),
+            down: None,
+        },
+        DealDirection::Buy1Sell2 => SignalParams {
+            hold_ms: DEFAULT_HOLD_MS,
+            up: None,
+            down: Some(dir_params),
+        },
     }
 }
 
@@ -231,17 +212,17 @@ pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl)
     }
 
     let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
-    info!("Start optimization UP");
+    info!("Start optimization UP on events {} - {}", events[0].event_datetime(), events[events.len() - 1].event_datetime());
     let params_up = optimize(events, cost_function, DealDirection::Sell1Buy2, solver);
 
-    let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
-    info!("Start optimization DOWN");
-    let params_down = optimize(events, cost_function, DealDirection::Buy1Sell2, solver);
+    //let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
+    //info!("Start optimization DOWN");
+    //let params_down = optimize(events, cost_function, DealDirection::Buy1Sell2, solver);
 
     SignalParams {
         hold_ms: DEFAULT_HOLD_MS,
         up: params_up,
-        down: params_down,
+        down: None, //params_down,
     }
 }
 
@@ -279,9 +260,9 @@ fn optimize(events: &[MarketEvent], cost_function: CostFunctionImpl, direction: 
     };
     if params.imbalance1_weights.iter().any(|w| w.abs() > f64::MIN_POSITIVE) &&
         params.imbalance2_weights.iter().any(|w| w.abs() > f64::MIN_POSITIVE) {
-        if !cost_function.optimize_threshold() && let Some(threshold) = find_threshold(events, params, direction) {
-            params.threshold = threshold;
-        }
+        //if !cost_function.optimize_threshold() && let Some(threshold) = find_threshold(events, params, direction) {
+        //    params.threshold = threshold;
+        //}
         Some(params)
     } else {
         None
@@ -332,7 +313,7 @@ pub fn collect_signal_to_pnl_values(events: &[MarketEvent], params: &SignalParam
                 let (_, revenue, cost) = deal.close(false);
                 signal_values.push(signal);
                 pnl_values.push(revenue - cost);
-                commission_values.push((revenue + cost) * COMMISSION_RATIO);
+                commission_values.push(commission(revenue, cost));
             }
         }
     }

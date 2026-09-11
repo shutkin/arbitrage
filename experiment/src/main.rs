@@ -7,18 +7,24 @@ mod deal;
 mod signals;
 
 use crate::math_utils::std_derivative;
-use crate::signal_optimization::{CostFunctionImpl, IMBALANCE_LEVELS};
+use crate::signal_optimization::{calibrate_params, CostFunctionImpl, IMBALANCE_LEVELS};
 use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07};
-use crate::simulation::run_simulation_on_trades;
-use crate::stats_collector::signal_to_future_pnl_advances;
-use chrono::{DateTime, TimeDelta, Utc};
+use crate::simulation::{run_simulation, run_simulation_on_trades};
+use crate::stats_collector::{daily_signal_to_pnl, signal_to_future_pnl_advances};
+use chrono::{DateTime, Datelike, TimeDelta, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::info;
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::{Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
 
-const COMMISSION_RATIO: f64 = 0.015 / 100.0;
+pub fn commission(revenue: f64, cost: f64) -> f64 {
+    // T-Invest
+    //(revenue + cost) * 0.015 / 100.0
+
+    // Alor
+    5.0
+}
 
 fn find_instrument_id(instruments: &[Instrument], ticker: &str) -> Option<i16> {
     instruments
@@ -51,13 +57,9 @@ async fn main() -> EmptyResult {
     let db = db::Db::new(&db_url).await?;
 
     let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
-    let train_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-07T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-07T20:00:00Z")?.to_utc(),
-    );
-    let test_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-08T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-08T20:00:00Z")?.to_utc(),
+    let mut diapason = TimeDiapason::new(
+        DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
     );
 
     let all_instruments = db.get_instruments(false).await?;
@@ -65,22 +67,32 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-        let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
-        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], train_diapason, Some(&db)).await?;
-        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
-        info!("Calculate std deviations");
-        calculate_std_deviations(&mut all_values1);
-        calculate_std_deviations(&mut all_values2);
+        let mut daily_events = Vec::new();
 
-        let events = merge_events(&all_values1, &all_values2, &[], &[]);
-        info!("{} events", events.len());
-        info!("Test Diapason:\n\n{}", signal_to_future_pnl_advances(&events).join("\n\n"));
+        for day in 3..10 {
+            if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
+                info!("DAY {day}");
+                let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
+                let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
+                convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
+                info!("Calculate std deviations");
+                calculate_std_deviations(&mut all_values1);
+                calculate_std_deviations(&mut all_values2);
+                let day_events = merge_events(&all_values1, &all_values2, &[], &[]);
+                daily_events.push(day_events);
+            }
+
+            diapason.from += TimeDelta::days(1);
+            diapason.to += TimeDelta::days(1);
+        }
+
+        info!("Huber:\n\n{}", daily_signal_to_pnl(daily_events));
     }
     Ok(())
 }
 
 #[tokio::main]
-async fn _main() -> EmptyResult {
+async fn __main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -101,6 +113,52 @@ async fn _main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
+        let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
+        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], train_diapason, Some(&db)).await?;
+        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
+        info!("Calculate std deviations");
+        calculate_std_deviations(&mut all_values1);
+        calculate_std_deviations(&mut all_values2);
+        let train_events = merge_events(&all_values1, &all_values2, &[], &[]);
+        info!("{} train events", train_events.len());
+
+        let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
+        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], test_diapason, Some(&db)).await?;
+        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
+        info!("Calculate std deviations");
+        calculate_std_deviations(&mut all_values1);
+        calculate_std_deviations(&mut all_values2);
+        let test_events = merge_events(&all_values1, &all_values2, &[], &[]);
+        info!("{} test events", train_events.len());
+
+        info!("Test Diapason:\n\n{}", signal_to_future_pnl_advances(&train_events, &test_events).join("\n\n"));
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn _main() -> EmptyResult {
+    dotenv::dotenv().ok();
+    SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
+    let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
+    let db = db::Db::new(&db_url).await?;
+
+    let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
+    let train_diapason = TimeDiapason::new(
+        DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
+    );
+    let test_diapason = TimeDiapason::new(
+        DateTime::parse_from_rfc3339("2026-09-04T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-04T20:00:00Z")?.to_utc(),
+    );
+    let functions = [CostFunctionImpl::TradingSimulation];
+
+    let all_instruments = db.get_instruments(false).await?;
+    if let (Some(inst1_id), Some(inst2_id)) = (
+        find_instrument_id(&all_instruments, tickers[0]),
+        find_instrument_id(&all_instruments, tickers[1]),
+    ) {
         info!("Train on {train_diapason:?}");
         let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
 
@@ -112,13 +170,11 @@ async fn _main() -> EmptyResult {
         let events = merge_events(&all_values1, &all_values2, &[], &[]);
         info!("Total train events: {}", events.len());
 
-        let spearman_params = signal_spearman_09_07();
-
-        let huber_params = signal_huber_09_07();// calibrate_params(&events, CostFunctionImpl::HuberLoss);
-        info!("{:?} {huber_params:?}", CostFunctionImpl::HuberLoss);
-
-        let trading_params = signal_trading_09_07();// calibrate_params(&events, CostFunctionImpl::TradingSimulation);
-        info!("{:?} {trading_params:?}", CostFunctionImpl::TradingSimulation);
+        let parameters = functions.iter().map(|&func| {
+            let params = calibrate_params(&events, func);
+            info!("{func:?} {params:?}");
+            params
+        }).collect::<Vec<_>>();
 
         info!("Test on {test_diapason:?}");
         all_values1.clear();
@@ -134,18 +190,12 @@ async fn _main() -> EmptyResult {
         let events = merge_events(&all_values1, &all_values2, &trades1, &trades2);
         info!("Total test events: {}", events.len());
 
-        let result = run_simulation_on_trades(&events, &spearman_params, 10, false);
-        info!("{:?}. Deals {}. Income {}, outcome {}, commission {}, net profit {}",
-            CostFunctionImpl::SpearmanRanking,
+        functions.iter().zip(parameters.iter()).for_each(|(&func, params)| {
+            let result = run_simulation(&events, params);
+            //let result = run_simulation_on_trades(&events, params, 10, false);
+            info!("{func:?}. Deals {}. Income {}, outcome {}, commission {}, net profit {}",
             result.win + result.loss, result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);
-        let result = run_simulation_on_trades(&events, &huber_params, 10, false);
-        info!("{:?}. Deals {}. Income {}, outcome {}, commission {}, net profit {}",
-            CostFunctionImpl::HuberLoss,
-            result.win + result.loss, result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);
-        let result = run_simulation_on_trades(&events, &trading_params, 10, false);
-        info!("{:?}. Deals {}. Income {}, outcome {}, commission {}, net profit {}",
-            CostFunctionImpl::TradingSimulation,
-            result.win + result.loss, result.income, result.outcome, result.commission, result.income - result.outcome - result.commission);
+        });
     }
 
     Ok(())
@@ -262,7 +312,7 @@ enum MarketEvent {
 }
 
 impl MarketEvent {
-    pub fn time(&self) -> DateTime<Utc> {
+    pub fn event_datetime(&self) -> DateTime<Utc> {
         match self {
             MarketEvent::OrderBook1(order_book) => order_book.time,
             MarketEvent::OrderBook2(order_book) => order_book.time,
@@ -273,7 +323,7 @@ impl MarketEvent {
 }
 
 pub fn market_events_time_diapason(events: &[MarketEvent]) -> TimeDelta {
-    events[events.len() - 1].time() - events[0].time()
+    events[events.len() - 1].event_datetime() - events[0].event_datetime()
 }
 
 #[derive(Copy, Clone, Debug)]

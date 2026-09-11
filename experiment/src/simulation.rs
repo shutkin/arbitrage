@@ -1,8 +1,7 @@
 use crate::deal::{Deal, DealDirection};
 use crate::signal_optimization::{Signal, SignalParams};
-use crate::{COMMISSION_RATIO, MarketEvent, OrderBookValues};
+use crate::{MarketEvent, OrderBookValues, commission};
 use chrono::{DateTime, TimeDelta, Utc};
-use correlation::spearmanr;
 use model::Trade;
 
 pub struct SimulationResult {
@@ -168,7 +167,7 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams) -> Simulati
         loss,
         income: total_revenue,
         outcome: total_cost,
-        commission: (total_revenue + total_cost) * COMMISSION_RATIO,
+        commission: commission(total_revenue, total_cost),
     }
 }
 
@@ -212,7 +211,7 @@ pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, l
         }
 
         if let Some(values1) = &last_order_book1 && let Some(values2) = &last_order_book2 {
-            let cur_signal = params.signal(&values1, &values2);
+            let cur_signal = params.signal(values1, values2);
 
             if cur_deal.is_none() {
                 if let Some(next_deal_time) = next_deal_time &&
@@ -251,6 +250,6 @@ pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, l
         loss,
         income: total_revenue,
         outcome: total_cost,
-        commission: (total_revenue + total_cost) * COMMISSION_RATIO,
+        commission: commission(total_revenue, total_cost),
     }
 }
