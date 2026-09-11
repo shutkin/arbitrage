@@ -7,16 +7,16 @@ mod deal;
 mod signals;
 
 use crate::math_utils::std_derivative;
-use crate::signal_optimization::{calibrate_params, CostFunctionImpl, IMBALANCE_LEVELS};
-use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07};
-use crate::simulation::{run_simulation, run_simulation_on_trades};
-use crate::stats_collector::{daily_signal_to_pnl, signal_to_future_pnl_advances};
+use crate::signal_optimization::{CostFunctionImpl, IMBALANCE_LEVELS, calibrate_params};
+use crate::simulation::run_simulation;
+use crate::stats_collector::{daily_signal_to_pnl, deviation_to_spread_movement, signal_contributions};
 use chrono::{DateTime, Datelike, TimeDelta, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::info;
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::{Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
+use crate::signals::signal_huber_09_03;
 
 pub fn commission(revenue: f64, cost: f64) -> f64 {
     // T-Invest
@@ -50,7 +50,7 @@ async fn get_order_books(tickers: &[&str], ids: &[i16], diapason: TimeDiapason, 
 }
 
 #[tokio::main]
-async fn main() -> EmptyResult {
+async fn __main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -92,7 +92,7 @@ async fn main() -> EmptyResult {
 }
 
 #[tokio::main]
-async fn __main() -> EmptyResult {
+async fn main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -100,8 +100,8 @@ async fn __main() -> EmptyResult {
 
     let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
     let train_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-07T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-07T20:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
     );
     let test_diapason = TimeDiapason::new(
         DateTime::parse_from_rfc3339("2026-09-08T05:00:00Z")?.to_utc(),
@@ -131,7 +131,10 @@ async fn __main() -> EmptyResult {
         let test_events = merge_events(&all_values1, &all_values2, &[], &[]);
         info!("{} test events", train_events.len());
 
-        info!("Test Diapason:\n\n{}", signal_to_future_pnl_advances(&train_events, &test_events).join("\n\n"));
+        let mut params = signal_huber_09_03();
+        params.down = None;
+        info!("Train:\n{}", deviation_to_spread_movement(&train_events, params));
+        info!("Test:\n{}", deviation_to_spread_movement(&test_events, params));
     }
     Ok(())
 }
