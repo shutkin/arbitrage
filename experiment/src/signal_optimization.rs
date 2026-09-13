@@ -20,25 +20,17 @@ pub struct SignalParamsDir {
     pub derivative2_weight: f64,
     pub imbalance1_weights: [f64; IMBALANCE_LEVELS.len()],
     pub imbalance2_weights: [f64; IMBALANCE_LEVELS.len()],
-    pub d1_i1_3: f64,
-    pub d1_i1_10: f64,
-    pub d2_i2_10: f64,
-    pub d2_i2_20: f64,
 }
 
 impl SignalParamsDir {
     pub fn from_array(array: &Array1<f64>) -> Self {
-        if array.len() == 14 {
+        if array.len() == 12 {
             Self {
                 threshold: 0.0,
                 derivative1_weight: array[0].max(0.0),
                 derivative2_weight: array[1],
-                imbalance1_weights: [array[2], array[3], array[4], array[5], 0.0],
-                imbalance2_weights: [array[6], array[7], array[8], array[9], 0.0],
-                d1_i1_3: array[10],
-                d1_i1_10: array[11],
-                d2_i2_10: array[12],
-                d2_i2_20: array[13],
+                imbalance1_weights: [array[2], array[3], array[4], array[5], array[6]],
+                imbalance2_weights: [array[7], array[8], array[9], array[10], array[11]],
             }
         } else if array.len() == 2 {
             Self {
@@ -47,10 +39,6 @@ impl SignalParamsDir {
                 derivative2_weight: array[1],
                 imbalance1_weights: [0.0,0.0,0.0,0.0,0.0],
                 imbalance2_weights: [0.0,0.0,0.0,0.0,0.0],
-                d1_i1_3: 0.0,
-                d1_i1_10: 0.0,
-                d2_i2_10: 0.0,
-                d2_i2_20: 0.0,
             }
         } else {
             Self {
@@ -59,10 +47,6 @@ impl SignalParamsDir {
                 derivative2_weight: array[2],
                 imbalance1_weights: [array[3], array[4], array[5], array[6], 0.0],
                 imbalance2_weights: [array[7], array[8], array[9], array[10], 0.0],
-                d1_i1_3: 0.0,
-                d1_i1_10: 0.0,
-                d2_i2_10: 0.0,
-                d2_i2_20: 0.0,
             }
         }
     }
@@ -92,16 +76,12 @@ impl SignalParams {
                 signal += params.imbalance1_weights[i] * values1.imbalances[i]
                     + params.imbalance2_weights[i] * values2.imbalances[i];
             }
-            signal += params.d1_i1_3 * values1.std_derivative * values1.imbalances[0]
-                + params.d1_i1_10 * values1.std_derivative * values1.imbalances[2]
-                + params.d2_i2_10 * values2.std_derivative * values2.imbalances[2]
-                + params.d2_i2_20 * values2.std_derivative * values2.imbalances[3];
             Some(signal - params.threshold)
         } else { None }
     }
 
     pub fn signal_score_contributions(&self, values1: &OrderBookValues, values2: &OrderBookValues)
-        -> Option<(f64, f64, f64, f64, f64)> {
+        -> Option<(f64, f64, f64, f64)> {
         let params = if values1.std_derivative > 0.0 {&self.up} else {&self.down};
         if let Some(params) = params {
             let deviations = params.derivative1_weight * values1.std_derivative.abs()
@@ -112,12 +92,8 @@ impl SignalParams {
             let imbalances2 = (0..IMBALANCE_LEVELS.len()).map(|i| {
                 params.imbalance2_weights[i] * values2.imbalances[i]
             }).sum::<f64>();
-            let multiplies = params.d1_i1_3 * values1.std_derivative * values1.imbalances[0]
-                + params.d1_i1_10 * values1.std_derivative * values1.imbalances[2]
-                + params.d2_i2_10 * values2.std_derivative * values2.imbalances[2]
-                + params.d2_i2_20 * values2.std_derivative * values2.imbalances[3];
-            let signal = deviations + imbalances1 + imbalances2 + multiplies;
-            Some((signal - params.threshold, deviations, imbalances1, imbalances2, multiplies))
+            let signal = deviations + imbalances1 + imbalances2;
+            Some((signal - params.threshold, deviations, imbalances1, imbalances2))
         } else { None }
     }
 
@@ -228,14 +204,14 @@ fn create_params_for_direction(p: &Array1<f64>, direction: DealDirection) -> Sig
     }
 }
 
-pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl) -> SignalParams {
+pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl, dir: DealDirection) -> SignalParams {
     let initial = Array1::from_vec(
         if cost_function.optimize_threshold() {
             //   A    D1   D2   I3   I5   I10  I20  I3   I5   I10  I20
             vec![3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         } else {
-            //   D1   D2   I3   I5   I10  I20  I3   I5   I10  I20  D1*I3 D1*I10 D2*I10 D2*I20
-            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  0.0,   0.0,   0.0]
+            //   D1   D2   I3   I5   I10  I20  I50  I3   I5   I10  I20  I50
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         },
     );
 
@@ -260,18 +236,27 @@ pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl)
         simplex.push(point);
     }
 
-    //let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
-    //info!("Start optimization UP on events {} - {}", events[0].event_datetime(), events[events.len() - 1].event_datetime());
-    //let params_up = optimize(events, cost_function, DealDirection::Sell1Buy2, solver);
-
-    let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
-    info!("Start optimization DOWN on events {} - {}", events[0].event_datetime(), events[events.len() - 1].event_datetime());
-    let params_down = optimize(events, cost_function, DealDirection::Buy1Sell2, solver);
-
-    SignalParams {
-        hold_ms: DEFAULT_HOLD_MS,
-        up: None,//params_up,
-        down: params_down,
+    match dir {
+        DealDirection::Sell1Buy2 => {
+            let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
+            info!("Start optimization UP on events {} - {}", events[0].event_datetime(), events[events.len() - 1].event_datetime());
+            let params_up = optimize(events, cost_function, DealDirection::Sell1Buy2, solver);
+            SignalParams {
+                hold_ms: DEFAULT_HOLD_MS,
+                up: params_up,
+                down: None,
+            }
+        }
+        DealDirection::Buy1Sell2 => {
+            let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
+            info!("Start optimization DOWN on events {} - {}", events[0].event_datetime(), events[events.len() - 1].event_datetime());
+            let params_down = optimize(events, cost_function, DealDirection::Buy1Sell2, solver);
+            SignalParams {
+                hold_ms: DEFAULT_HOLD_MS,
+                up: None,
+                down: params_down,
+            }
+        }
     }
 }
 
@@ -315,7 +300,7 @@ pub struct SignalPnL {
     pub signal: Vec<f64>,
     pub pnl: Vec<f64>,
     pub commission: Vec<f64>,
-    pub contributions: Vec<[f64; 4]>,
+    pub contributions: Vec<[f64; 3]>,
 }
 
 pub fn collect_signal_to_pnl_values(events: &[MarketEvent], params: &SignalParams) -> SignalPnL {
@@ -333,8 +318,8 @@ pub fn collect_signal_to_pnl_values(events: &[MarketEvent], params: &SignalParam
         }
 
         if let Some(v1) = &last_order_book1 && let Some(v2) = &last_order_book2 &&
-            let Some((signal, c0, c1, c2, c3)) = params.signal_score_contributions(v1, v2) {
-            contributions_values.push([c0, c1, c2, c3]);
+            let Some((signal, c0, c1, c2)) = params.signal_score_contributions(v1, v2) {
+            contributions_values.push([c0, c1, c2]);
             let mut deal = if v1.std_derivative > 0.0 {
                 Deal::sell1_buy2(v1, v2)
             } else {

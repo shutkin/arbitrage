@@ -1,10 +1,10 @@
 use crate::deal::{Deal, DealDirection};
-use crate::math_utils::{mean, median, positive_percentile, standard_deviation};
-use crate::signal_optimization::{calibrate_params, collect_signal_to_pnl_values, SignalParams, SignalPnL, DEFAULT_HOLD_MS, CostFunctionImpl};
+use crate::math_utils::positive_percentile;
+use crate::signal_optimization::{CostFunctionImpl, SignalParams, SignalPnL, calibrate_params, collect_signal_to_pnl_values};
 //use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
 use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
-use crate::{commission, MarketEvent};
-use chrono::{TimeDelta, Timelike};
+use crate::{MarketEvent, commission};
+use chrono::TimeDelta;
 use log::info;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -71,12 +71,10 @@ pub fn signal_contributions(events: &[MarketEvent], params: &SignalParams) -> St
             let d = contributions.iter().map(|c| c[0]).sum::<f64>() / size;
             let i1 = contributions.iter().map(|c| c[1]).sum::<f64>() / size;
             let i2 = contributions.iter().map(|c| c[2]).sum::<f64>() / size;
-            let m = contributions.iter().map(|c| c[3]).sum::<f64>() / size;
             vec![
                 ("D".to_string(), format!("{d}")),
                 ("I1".to_string(), format!("{i1}")),
                 ("I2".to_string(), format!("{i2}")),
-                ("D*I".to_string(), format!("{m}")),
             ]
         }
     }
@@ -85,6 +83,53 @@ pub fn signal_contributions(events: &[MarketEvent], params: &SignalParams) -> St
     collect_to_table(&mut runner)
 }
 
+pub fn trend_buckets(daily_events: &[(String, Vec<MarketEvent>)]) -> String {
+    const BUCKETS: [Range<f64>; 10] = [-1000.0..-0.5, -0.5..-0.25, -0.25..-0.125, -0.125..-0.0625, -0.0625..0.0, 0.0..0.0625, 0.0625..0.125, 0.125..0.25, 0.25..0.5, 0.5..1000.0];
+
+    struct Runner<'a> {
+        daily_events: &'a [(String, Vec<MarketEvent>)],
+    }
+
+    impl StatisticsProvider for Runner<'_> {
+        fn variants(&self) -> Vec<String> {
+            BUCKETS.iter().map(|r| format!("{r:?}")).collect()
+        }
+
+        fn run(&mut self, variant: u8) -> Vec<(String, String)> {
+            let bucket_range = &BUCKETS[variant as usize];
+            let mut rows = Vec::new();
+            for (day, day_events) in self.daily_events {
+                let (mut bucket_c, mut bucket_a) = (0, 0);
+                let (mut v1, mut v2) = (None, None);
+                for event in day_events {
+                    match event {
+                        MarketEvent::OrderBook1(v) => v1 = Some(v),
+                        MarketEvent::OrderBook2(v) => v2 = Some(v),
+                        _ => {}
+                    }
+                    if let Some(v1) = v1 && let Some(v2) = v2 {
+                        let c = (v1.trend + v2.trend) * 0.5;
+                        let a = (v1.trend + v2.trend) / (v1.trend.abs() + v2.trend.abs());
+
+                        if bucket_range.contains(&c) {
+                            bucket_c += 1;
+                        }
+                        if bucket_range.contains(&a) {
+                            bucket_a += 1;
+                        }
+                    }
+                }
+                rows.extend(vec![
+                    (format!("{day}: C"), format!("{bucket_c}")),
+                    (format!("{day}: A"), format!("{bucket_a}"))]);
+            }
+            rows
+        }
+    }
+
+    let mut runner = Runner { daily_events };
+    collect_to_table(&mut runner)
+}
 
 pub fn deviation_to_spread_movement(events: &[MarketEvent], params: SignalParams) -> String {
     const HORIZONS: [i64; 5] = [100, 250, 500, 1000, 2000];
@@ -319,7 +364,7 @@ pub fn signal_after_deal(events: &[MarketEvent], params: SignalParams) -> String
     collect_to_table(&mut runner)
 }
 
-pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>) -> String {
+pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>, dir: DealDirection) -> String {
     const PERCENTILES: [f64; 5] = [0.05, 0.02, 0.01, 0.005, 0.002];
 
     struct Runner {
@@ -329,7 +374,7 @@ pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>) -> String {
     }
 
     impl Runner {
-        pub fn new(daily_events: Vec<Vec<MarketEvent>>) -> Self {
+        pub fn new(daily_events: Vec<Vec<MarketEvent>>, dir: DealDirection) -> Self {
             let mut day_titles = Vec::new();
             let mut daily_values = Vec::new();
             let mut daily_signal_sorted = Vec::new();
@@ -344,7 +389,7 @@ pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>) -> String {
                 }
                 day_titles.push(format!("{}", daily_events[i][0].event_datetime().date_naive()));
 
-                let params = calibrate_params(&train_events, CostFunctionImpl::HuberLoss);
+                let params = calibrate_params(&train_events, CostFunctionImpl::HuberLoss, dir);
                 let values = collect_signal_to_pnl_values(&daily_events[i], &params);
                 let mut signal_sorted = values.signal.clone();
                 signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -363,13 +408,13 @@ pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>) -> String {
 
     impl StatisticsProvider for Runner {
         fn variants(&self) -> Vec<String> {
-            PERCENTILES.iter().flat_map(|p| vec![format!("{p}% total PnL"), format!("{p}% median PnL"), format!("{p}% win rate")]).collect()
+            PERCENTILES.iter().flat_map(|p| vec![format!("{p}% total PnL"), format!("{p}% win rate")]).collect()
         }
 
         fn run(&mut self, variant: u8) -> Vec<(String, String)> {
             let mut result = Vec::new();
             for (day, (values, signal_sorted)) in self.values.iter().zip(self.signal_sorted.iter()).enumerate() {
-                let percentile = PERCENTILES[variant as usize / 3];
+                let percentile = PERCENTILES[variant as usize / 2];
                 let offset_from_top = (signal_sorted.len() as f64 * percentile / 100.0).round() as usize;
                 let threshold = signal_sorted[signal_sorted.len() - 1 - offset_from_top];
                 let mut pnl_values = Vec::new();
@@ -379,9 +424,8 @@ pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>) -> String {
                     }
                 }
                 let date = self.day_titles[day].clone();
-                let v = match variant % 3 {
+                let v = match variant % 2 {
                     0 => format!("{:.3}", pnl_values.iter().sum::<f64>()),
-                    1 => format!("{:.3}", median(&pnl_values)),
                     _ => format!("{:.2}%", positive_percentile(&pnl_values)),
                 };
                 result.push((date, v));
@@ -390,7 +434,7 @@ pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>) -> String {
         }
     }
 
-    let mut runner = Runner::new(daily_events);
+    let mut runner = Runner::new(daily_events, dir);
     collect_to_table(&mut runner)
 }
 /*

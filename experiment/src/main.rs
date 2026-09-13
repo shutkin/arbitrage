@@ -6,17 +6,18 @@ mod stats_collector;
 mod deal;
 mod signals;
 
-use crate::math_utils::std_derivative;
+use crate::deal::DealDirection;
+use crate::math_utils::{mean, median, standard_deviation};
 use crate::signal_optimization::{CostFunctionImpl, IMBALANCE_LEVELS, calibrate_params};
+use crate::signals::signal_huber_09_03;
 use crate::simulation::run_simulation;
-use crate::stats_collector::{daily_signal_to_pnl, deviation_to_spread_movement, signal_contributions};
+use crate::stats_collector::{daily_signal_to_pnl, deviation_to_spread_movement, trend_buckets};
 use chrono::{DateTime, Datelike, TimeDelta, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::info;
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::{Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
-use crate::signals::signal_huber_09_03;
 
 pub fn commission(revenue: f64, cost: f64) -> f64 {
     // T-Invest
@@ -69,7 +70,7 @@ async fn __main() -> EmptyResult {
     ) {
         let mut daily_events = Vec::new();
 
-        for day in 3..10 {
+        for day in 3..12 {
             if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
                 info!("DAY {day}");
                 let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
@@ -86,7 +87,11 @@ async fn __main() -> EmptyResult {
             diapason.to += TimeDelta::days(1);
         }
 
-        info!("Huber:\n\n{}", daily_signal_to_pnl(daily_events));
+        let events_clone = daily_events.clone();
+        std::thread::spawn(move || {
+            info!("UP:\n{}\n", daily_signal_to_pnl(events_clone, DealDirection::Sell1Buy2));
+        });
+        info!("DOWN:\n{}\n", daily_signal_to_pnl(daily_events, DealDirection::Buy1Sell2));
     }
     Ok(())
 }
@@ -99,13 +104,9 @@ async fn main() -> EmptyResult {
     let db = db::Db::new(&db_url).await?;
 
     let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
-    let train_diapason = TimeDiapason::new(
+    let mut diapason = TimeDiapason::new(
         DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
         DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
-    );
-    let test_diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-08T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-08T20:00:00Z")?.to_utc(),
     );
 
     let all_instruments = db.get_instruments(false).await?;
@@ -113,28 +114,31 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-        let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
-        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], train_diapason, Some(&db)).await?;
-        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
-        info!("Calculate std deviations");
-        calculate_std_deviations(&mut all_values1);
-        calculate_std_deviations(&mut all_values2);
-        let train_events = merge_events(&all_values1, &all_values2, &[], &[]);
-        info!("{} train events", train_events.len());
+        let mut daily_events = Vec::new();
 
-        let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
-        let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], test_diapason, Some(&db)).await?;
-        convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
-        info!("Calculate std deviations");
-        calculate_std_deviations(&mut all_values1);
-        calculate_std_deviations(&mut all_values2);
-        let test_events = merge_events(&all_values1, &all_values2, &[], &[]);
-        info!("{} test events", train_events.len());
+        for day in 3..12 {
+            if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
+                info!("DAY {day}");
+                let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
+                let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
+                convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
 
-        let mut params = signal_huber_09_03();
-        params.down = None;
-        info!("Train:\n{}", deviation_to_spread_movement(&train_events, params));
-        info!("Test:\n{}", deviation_to_spread_movement(&test_events, params));
+                info!("Calculate std deviations");
+                calculate_std_deviations(&mut all_values1);
+                calculate_std_deviations(&mut all_values2);
+
+                info!("Calculate trend");
+                calculate_trend(&mut all_values1);
+                calculate_trend(&mut all_values2);
+
+                let day_events = merge_events(&all_values1, &all_values2, &[], &[]);
+                daily_events.push((diapason.from.date_naive().to_string(), day_events));
+            }
+
+            diapason.from += TimeDelta::days(1);
+            diapason.to += TimeDelta::days(1);
+        }
+        info!("\n{}", trend_buckets(&daily_events));
     }
     Ok(())
 }
@@ -174,7 +178,7 @@ async fn _main() -> EmptyResult {
         info!("Total train events: {}", events.len());
 
         let parameters = functions.iter().map(|&func| {
-            let params = calibrate_params(&events, func);
+            let params = calibrate_params(&events, func, DealDirection::Sell1Buy2);
             info!("{func:?} {params:?}");
             params
         }).collect::<Vec<_>>();
@@ -338,6 +342,7 @@ struct OrderBookValues {
     micro: f64,
     imbalances: [f64; IMBALANCE_LEVELS.len()],
     std_derivative: f64,
+    trend: f64,
 }
 
 impl OrderBookValues {
@@ -391,12 +396,75 @@ fn calculate_values(order_book: &OrderBook) -> Option<OrderBookValues> {
         micro,
         imbalances,
         std_derivative: 0.0,
+        trend: 0.0,
     })
 }
 
+const STD_DEVIATION_WINDOW_SECONDS: i64 = 15 * 60;
+const TREND_TAU_SECONDS: f64 = 30.0;
+
 fn calculate_std_deviations(values: &mut [OrderBookValues]) {
-    for i in 32..values.len() {
-        let d = std_derivative(values, i);
-        values[i].std_derivative = d;
+    let mut window_mids = Vec::new();
+    let mut window_derivatives = Vec::new();
+    let mut window_times = Vec::<DateTime<Utc>>::new();
+
+    for (i, v) in values.iter_mut().enumerate() {
+        let window_start = v.time - TimeDelta::seconds(STD_DEVIATION_WINDOW_SECONDS);
+        while !window_times.is_empty() && window_times[0] < window_start {
+            window_times.remove(0);
+            window_derivatives.remove(0);
+            window_mids.remove(0);
+        }
+
+        let mut prev_index = window_mids.len() as i32 - 1;
+        while prev_index >= 0 && window_times[prev_index as usize] == v.time {
+            prev_index -= 1;
+        }
+
+        let derivative: f64 = if prev_index >= 0 {
+            (v.mid - window_mids[prev_index as usize]) / (v.time.timestamp_millis() - window_times[prev_index as usize].timestamp_millis()) as f64
+        } else { 0.0 };
+
+        if derivative.abs() > f64::MIN_POSITIVE {
+            let d = if let Some(std) = standard_deviation(&window_derivatives) {
+                if std > 0.0000001 {
+                    derivative / std
+                } else {
+                    if derivative > 0.0 { 100.0 } else { -100.0 }
+                }
+            } else {
+                0.0
+            };
+            if !d.is_nan() {
+                v.std_derivative = d;
+            }
+        }
+
+        window_mids.push(v.mid);
+        window_derivatives.push(derivative);
+        window_times.push(v.time);
+    }
+}
+
+fn calculate_trend(values: &mut [OrderBookValues]) {
+    let mut trend = 0.0;
+    let mut prev_time = Option::<DateTime<Utc>>::None;
+
+    for value in values.iter_mut() {
+        if let Some(cur_prev_time) = prev_time {
+            //if value.time > cur_prev_time {
+                let dt = (value.time - cur_prev_time).as_seconds_f64();
+                let alpha = 1.0 - (-dt / TREND_TAU_SECONDS).exp();
+                trend += alpha * (value.std_derivative - trend);
+                value.trend = trend;
+                prev_time = Some(value.time);
+            //} else {
+            //    value.trend = trend;
+            //}
+        } else {
+            trend = value.std_derivative;
+            value.trend = trend;
+            prev_time = Some(value.time);
+        }
     }
 }

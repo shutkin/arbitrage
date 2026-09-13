@@ -1,5 +1,5 @@
-use crate::OrderBookValues;
 use chrono::TimeDelta;
+use crate::OrderBookValues;
 
 pub const DEVIATION_MAX_VALUE: f64 = 100.0;
 
@@ -24,7 +24,7 @@ pub fn positive_percentile(data: &[f64]) -> f64 {
 
 pub fn standard_deviation(data: &[f64]) -> Option<f64> {
     let count = data.len();
-    if count == 0 {
+    if count < 2 {
         return None;
     }
 
@@ -54,7 +54,7 @@ fn calc_derivative(values: &[OrderBookValues], i: usize) -> f64 {
     (values[i].mid - values[pi].mid) / (values[i].time.timestamp_millis() - values[pi].time.timestamp_millis()) as f64
 }
 
-pub fn std_derivative(values: &[OrderBookValues], i: usize) -> f64 {
+pub fn std_derivative_old(values: &[OrderBookValues], i: usize) -> f64 {
     if i < 2 {
         return 0.0;
     }
