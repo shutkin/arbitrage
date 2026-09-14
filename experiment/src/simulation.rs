@@ -1,5 +1,5 @@
 use crate::deal::{Deal, DealDirection};
-use crate::signal_optimization::{Signal, SignalParams};
+use crate::signal_optimization::{Signal, SignalParams, TrendFilter};
 use crate::{MarketEvent, OrderBookValues, commission};
 use chrono::{DateTime, TimeDelta, Utc};
 use model::Trade;
@@ -88,7 +88,7 @@ pub fn run_stats(events: &[MarketEvent], params: &SignalParams, deal_handler: &m
         }
 
         if let Some(values1) = &last_order_book1 && let Some(values2) = &last_order_book2 {
-            let cur_signal = params.signal(values1, values2);
+            let (cur_signal, _) = params.signal(values1, values2);
 
             if cur_signal != prev_signal &&
                 let Some(deal) = match cur_signal {
@@ -103,14 +103,15 @@ pub fn run_stats(events: &[MarketEvent], params: &SignalParams, deal_handler: &m
     deal_handler.get_stats()
 }
 
-pub fn run_simulation(events: &[MarketEvent], params: &SignalParams) -> SimulationResult {
+pub fn run_simulation(events: &[MarketEvent], params: &SignalParams, apply_filters: bool) -> SimulationResult {
     let (mut win, mut loss) = (0, 0);
-    let (mut total_revenue, mut total_cost) = (0.0, 0.0);
+    let (mut total_revenue, mut total_cost, mut total_commission) = (0.0, 0.0, 0.0);
     let mut cur_deal = Option::<Deal>::None;
     let (mut last_order_book1, mut last_order_book2) = (None, None);
     let mut prev_signal = Signal::None;
+    let mut scores = Vec::new();
 
-    for (i, event) in events.iter().enumerate() {
+    for event in events {
         match event {
             MarketEvent::OrderBook1(values) => last_order_book1 = Some(*values),
             MarketEvent::OrderBook2(values) => last_order_book2 = Some(*values),
@@ -135,18 +136,20 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams) -> Simulati
                 deal.close_instrument2(price, v.time)
             }
             if deal.is_completed() {
-                let (time, revenue, cost) = deal.close(false);
+                let (quantity, revenue, cost) = deal.close(false);
                 if revenue > cost {win += 1} else {loss += 1};
-                total_revenue += revenue;
-                total_cost += cost;
+                total_revenue += revenue * quantity as f64;
+                total_cost += cost * quantity as f64;
+                total_commission += commission(revenue, cost) * quantity as f64;
                 cur_deal = None;
             }
         }
 
         if let Some(values1) = &last_order_book1 && let Some(values2) = &last_order_book2 {
-            let cur_signal = params.signal(values1, values2);
+            let (cur_signal, score) = params.signal(values1, values2);
 
             if cur_deal.is_none() &&
+                (!apply_filters || TrendFilter::filter(values1, values2) && filter_by_scores(score, &scores)) &&
                 cur_signal != prev_signal {
                 cur_deal = match cur_signal {
                     Signal::None => None,
@@ -160,6 +163,13 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams) -> Simulati
             }
 
             prev_signal = cur_signal;
+            
+            if apply_filters {
+                scores.push(score);
+                if scores.len() > 32768 {
+                    scores.remove(0);
+                }
+            }
         }
     }
     SimulationResult {
@@ -167,8 +177,20 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams) -> Simulati
         loss,
         income: total_revenue,
         outcome: total_cost,
-        commission: commission(total_revenue, total_cost),
+        commission: total_commission,
     }
+}
+
+fn filter_by_scores(score: f64, scores: &[f64]) -> bool {
+    let offset_from_top = (scores.len() as f64 * 0.0075 / 100.0).round() as usize;
+    if offset_from_top < 2 {
+        return false;
+    }
+
+    let mut scores = scores.to_vec();
+    scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let threshold = scores[scores.len() - 1 - offset_from_top];
+    score >= threshold
 }
 
 pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, latency: u32, log: bool) -> SimulationResult {
@@ -202,7 +224,7 @@ pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, l
             }
             if deal.is_completed() {
                 let (time, revenue, cost) = deal.close(log);
-                next_deal_time = Some(time + TimeDelta::milliseconds(10));
+                next_deal_time = Some(deal.get_close_time() + TimeDelta::milliseconds(10));
                 if revenue > cost {win += 1} else {loss += 1};
                 total_revenue += revenue;
                 total_cost += cost;
@@ -211,7 +233,7 @@ pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, l
         }
 
         if let Some(values1) = &last_order_book1 && let Some(values2) = &last_order_book2 {
-            let cur_signal = params.signal(values1, values2);
+            let (cur_signal, _) = params.signal(values1, values2);
 
             if cur_deal.is_none() {
                 if let Some(next_deal_time) = next_deal_time &&

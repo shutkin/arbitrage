@@ -1,12 +1,14 @@
+use std::io::Write;
 use crate::deal::{Deal, DealDirection};
 use crate::math_utils::positive_percentile;
-use crate::signal_optimization::{CostFunctionImpl, SignalParams, SignalPnL, calibrate_params, collect_signal_to_pnl_values};
+use crate::signal_optimization::{calibrate_params, collect_signal_to_pnl_values, CostFunctionImpl, Signal, SignalParams, SignalPnL};
 //use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
 use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
 use crate::{MarketEvent, commission};
-use chrono::TimeDelta;
+use chrono::{NaiveDate, TimeDelta};
 use log::info;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::ops::Range;
 
 pub trait StatisticsProvider {
@@ -80,6 +82,96 @@ pub fn signal_contributions(events: &[MarketEvent], params: &SignalParams) -> St
     }
 
     let mut runner = Runner::new(events, params);
+    collect_to_table(&mut runner)
+}
+
+pub struct DailyDataWithSignalParams {
+    pub day: NaiveDate,
+    pub events: Vec<MarketEvent>,
+    pub params: SignalParams,
+}
+
+pub fn trend_to_pnl(data: &[DailyDataWithSignalParams]) -> String {
+    const C_BUCKETS: [Range<f64>; 6] = [-1000.0..-0.25, -0.25..-0.0625, -0.0625..0.0, 0.0..0.0625, 0.0625..0.25, 0.25..1000.0];
+    const A_BUCKETS: [Range<f64>; 6] = [-1000.0..-0.95, -0.95..-0.75, -0.75..0.0, 0.0..0.75, 0.75..0.95, 0.95..1000.0];
+
+    struct Runner<'a> {
+        data: &'a [DailyDataWithSignalParams],
+    }
+
+    impl<'a> StatisticsProvider for Runner<'a> {
+        fn variants(&self) -> Vec<String> {
+            A_BUCKETS.iter().map(|c| format!("{c:?}")).collect()
+        }
+
+        fn run(&mut self, variant: u8) -> Vec<(String, String)> {
+            let a_range = &A_BUCKETS[variant as usize];
+            let mut pnl = [0.0, 0.0];
+            let mut counts = [0, 0];
+
+            for day_data in self.data {
+                let signal_up = SignalParams {
+                    hold_ms: day_data.params.hold_ms,
+                    up: day_data.params.up,
+                    down: None,
+                };
+                let signal_down = SignalParams {
+                    hold_ms: day_data.params.hold_ms,
+                    up: None,
+                    down: day_data.params.down,
+                };
+                let signals_calculators = [signal_up, signal_down];
+                let mut prev_signals = [Signal::None, Signal::None];
+                let (mut v1, mut v2) = (None, None);
+
+                for (event_index, event) in day_data.events.iter().enumerate() {
+                    match event {
+                        MarketEvent::OrderBook1(v) => v1 = Some(v),
+                        MarketEvent::OrderBook2(v) => v2 = Some(v),
+                        _ => {}
+                    }
+                    if let Some(v1) = v1 && let Some(v2) = v2 {
+                        //let c = (v1.trend + v2.trend) * 0.5;
+                        let a = (v1.trend + v2.trend) / (v1.trend.abs() + v2.trend.abs());
+                        for (signal_index, signal_calc) in signals_calculators.iter().enumerate() {
+                            let (signal, _) = signal_calc.signal(v1, v2);
+                            if signal != prev_signals[signal_index] && a_range.contains(&a) {
+                                let deal = match signal {
+                                    Signal::Sell1Buy2 => Some(Deal::sell1_buy2(v1, v2)),
+                                    Signal::Buy1Sell2 => Some(Deal::buy1_sell2(v1, v2)),
+                                    Signal::None => None,
+                                };
+                                if let Some(mut deal) = deal &&
+                                    let Some((hv1, hv2)) = find_order_books_on_horizon(
+                                        &day_data.events, event_index, deal.get_open_time() + TimeDelta::milliseconds(day_data.params.hold_ms as i64)) {
+                                    match deal.get_direction() {
+                                        DealDirection::Sell1Buy2 => {
+                                            deal.close_instrument1(hv1.ask, hv1.time);
+                                            deal.close_instrument2(hv2.bid, hv2.time);
+                                        },
+                                        DealDirection::Buy1Sell2 => {
+                                            deal.close_instrument1(hv1.bid, hv1.time);
+                                            deal.close_instrument2(hv2.ask, hv2.time);
+                                        }
+                                    }
+                                    let (_, revenue, cost) = deal.close(false);
+                                    pnl[signal_index] += revenue - cost - commission(revenue, cost);
+                                    counts[signal_index] += 1;
+                                }
+                            }
+                            prev_signals[signal_index] = signal;
+                        }
+                    }
+                }
+            }
+            vec![
+                ("Up".to_string(), format!("{:.3} ({})", pnl[0], counts[0])),
+                ("Down".to_string(), format!("{:.3} ({})", pnl[1], counts[1])),
+            ]
+        }
+    }
+
+    let mut runner = Runner { data };
     collect_to_table(&mut runner)
 }
 
@@ -387,13 +479,21 @@ pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>, dir: DealDirecti
                         train_events.extend_from_slice(&daily_events[train_day as usize]);
                     }
                 }
-                day_titles.push(format!("{}", daily_events[i][0].event_datetime().date_naive()));
+                let day_title = daily_events[i][0].event_datetime().date_naive().to_string();
 
                 let params = calibrate_params(&train_events, CostFunctionImpl::HuberLoss, dir);
+
+                let mut file = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open("params.txt").unwrap();
+                writeln!(file, "{day_title} {dir:?} {params:?}");
+                
                 let values = collect_signal_to_pnl_values(&daily_events[i], &params);
                 let mut signal_sorted = values.signal.clone();
                 signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 info!("Signals len {}", signal_sorted.len());
+                day_titles.push(day_title);
                 daily_values.push(values);
                 daily_signal_sorted.push(signal_sorted);
             }

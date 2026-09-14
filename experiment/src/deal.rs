@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use crate::OrderBookValues;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum DealDirection {
     Sell1Buy2, Buy1Sell2,
 }
@@ -10,6 +10,7 @@ pub enum DealDirection {
 pub struct Deal {
     direction: DealDirection,
     open_time: DateTime<Utc>,
+    quantity: u16,
     entry_price1: f64,
     entry_price2: f64,
     close_price1: Option<f64>,
@@ -30,6 +31,8 @@ impl Deal {
             // Buy GLZ6 -> ask
             entry_price2: v2.ask,
 
+            quantity: v1.quantity_bid.min(v2.quantity_ask),
+
             close_price1: None,
             close_price2: None,
             close_time1: None,
@@ -48,6 +51,8 @@ impl Deal {
             // Sell GLZ6 -> bid
             entry_price2: v2.bid,
 
+            quantity: v1.quantity_ask.min(v2.quantity_bid),
+
             close_price1: None,
             close_price2: None,
             close_time1: None,
@@ -61,6 +66,10 @@ impl Deal {
 
     pub fn get_open_time(&self) -> DateTime<Utc> {
         self.open_time
+    }
+
+    pub fn get_close_time(&self) -> DateTime<Utc> {
+        self.close_time1.unwrap().max(self.close_time2.unwrap())
     }
 
     pub fn close_instrument1(&mut self, price: f64, time: DateTime<Utc>) {
@@ -96,7 +105,7 @@ impl Deal {
         }
     }
 
-    pub fn close(&self, log: bool) -> (DateTime<Utc>, f64, f64) {
+    pub fn close(&self, log: bool) -> (u16, f64, f64) {
         if let Some(p1) = self.close_price1 && let Some (p2) = self.close_price2 &&
             let Some(close_time1) = self.close_time1 && let Some(close_time2) = self.close_time2 {
             match self.direction {
@@ -113,7 +122,7 @@ impl Deal {
                         );
                     }
 
-                    (close_time1.max(close_time2), revenue, cost)
+                    (self.quantity, revenue, cost)
                 }
 
                 DealDirection::Buy1Sell2 => {
@@ -129,7 +138,7 @@ impl Deal {
                         );
                     }
 
-                    (close_time1.max(close_time2), revenue, cost)
+                    (self.quantity, revenue, cost)
                 }
             }
         } else {
