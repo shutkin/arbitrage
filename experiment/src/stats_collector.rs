@@ -1,10 +1,10 @@
 use std::io::Write;
 use crate::deal::{Deal, DealDirection};
-use crate::math_utils::positive_percentile;
+use crate::math_utils::{median, p05_p95, positive_percentile};
 use crate::signal_optimization::{calibrate_params, collect_signal_to_pnl_values, CostFunctionImpl, Signal, SignalParams, SignalPnL};
 //use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
 use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
-use crate::{MarketEvent, commission};
+use crate::{commission, MarketEvent, DEFAULT_HOLD_MS};
 use chrono::{NaiveDate, TimeDelta};
 use log::info;
 use std::collections::HashMap;
@@ -89,6 +89,87 @@ pub struct DailyDataWithSignalParams {
     pub day: NaiveDate,
     pub events: Vec<MarketEvent>,
     pub params: SignalParams,
+}
+
+pub fn trend_ranges(events: &[MarketEvent]) -> String {
+    let mut up_spread_movements = Vec::new();
+    let mut down_spread_movements = Vec::new();
+
+    let (mut v1, mut v2) = (None, None);
+    for (i, event) in events.iter().enumerate() {
+        match event {
+            MarketEvent::OrderBook1(value) => v1 = Some(value),
+            MarketEvent::OrderBook2(value) => v2 = Some(value),
+            _ => {}
+        }
+
+        if let Some(v1) = v1 && let Some(v2) = v2 {
+            let horizon_time = v1.time.max(v2.time) + TimeDelta::milliseconds(DEFAULT_HOLD_MS as i64);
+            if let Some((hv1, hv2)) = find_order_books_on_horizon(events, i, horizon_time) {
+                let c = (v1.trend + v2.trend) * 0.5;
+                let a = (v1.trend + v2.trend) / (v1.trend.abs() + v2.trend.abs());
+                let a = if a.is_nan() {-1.0} else {a};
+                if a.abs() < 0.95 {
+                    let spread1 = v2.mid - v1.mid;
+                    let spread2 = hv2.mid - hv1.mid;
+                    if v1.std_derivative > 0.0 {
+                        up_spread_movements.push((c, a, spread2 - spread1));
+                    } else {
+                        down_spread_movements.push((c, a, spread1 - spread2));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+
+    let movements_up = up_spread_movements.iter().map(|(_, _, m)| *m).collect::<Vec<f64>>();
+    let movements_down = down_spread_movements.iter().map(|(_, _, m)| *m).collect::<Vec<f64>>();
+    let (_, threshold_up) = p05_p95(&movements_up);
+    let (_, threshold_down) = p05_p95(&movements_down);
+
+    let positive_c = up_spread_movements.iter()
+        .filter(|(_, _, m)| *m > threshold_up).map(|(c, _, _)| *c).collect::<Vec<_>>();
+    let (p05, p95) = p05_p95(&positive_c);
+    result.push(format!("Positive Up C: {p05} - {p95}"));
+
+    let negative_c = up_spread_movements.iter()
+        .filter(|(_, _, m)| *m < threshold_up).map(|(c, _, _)| *c).collect::<Vec<_>>();
+    let (p05, p95) = p05_p95(&negative_c);
+    result.push(format!("Negative Up C: {p05} - {p95}"));
+
+    let positive_c = down_spread_movements.iter()
+        .filter(|(_, _, m)| *m > threshold_down).map(|(c, _, _)| *c).collect::<Vec<_>>();
+    let (p05, p95) = p05_p95(&positive_c);
+    result.push(format!("Positive Down C: {p05} - {p95}"));
+
+    let negative_c = down_spread_movements.iter()
+        .filter(|(_, _, m)| *m < threshold_down).map(|(c, _, _)| *c).collect::<Vec<_>>();
+    let (p05, p95) = p05_p95(&negative_c);
+    result.push(format!("Negative Down C: {p05} - {p95}"));
+
+    let positive_a = up_spread_movements.iter()
+        .filter(|(_, _, m)| *m > threshold_up).map(|(_, a, _)| *a).collect::<Vec<_>>();
+    let (p05, p95) = p05_p95(&positive_a);
+    result.push(format!("Positive Up A: {p05} - {p95}"));
+
+    let negative_a = up_spread_movements.iter()
+        .filter(|(_, _, m)| *m < threshold_up).map(|(_, a, _)| *a).collect::<Vec<_>>();
+    let (p05, p95) = p05_p95(&negative_a);
+    result.push(format!("Negative Up A: {p05} - {p95}"));
+
+    let positive_a = down_spread_movements.iter()
+        .filter(|(_, _, m)| *m > threshold_down).map(|(_, a, _)| *a).collect::<Vec<_>>();
+    let (p05, p95) = p05_p95(&positive_a);
+    result.push(format!("Positive Down A: {p05} - {p95}"));
+
+    let negative_a = down_spread_movements.iter()
+        .filter(|(_, _, m)| *m < threshold_down).map(|(_, a, _)| *a).collect::<Vec<_>>();
+    let (p05, p95) = p05_p95(&negative_a);
+    result.push(format!("Negative Down A: {p05} - {p95}"));
+
+    result.join("\n")
 }
 
 pub fn trend_to_pnl(data: &[DailyDataWithSignalParams]) -> String {
@@ -481,14 +562,14 @@ pub fn daily_signal_to_pnl(daily_events: Vec<Vec<MarketEvent>>, dir: DealDirecti
                 }
                 let day_title = daily_events[i][0].event_datetime().date_naive().to_string();
 
-                let params = calibrate_params(&train_events, CostFunctionImpl::HuberLoss, dir);
+                let params = calibrate_params(&train_events, CostFunctionImpl::HuberLoss, dir, DEFAULT_HOLD_MS);
 
                 let mut file = OpenOptions::new()
                     .append(true)
                     .create(true)
                     .open("params.txt").unwrap();
                 writeln!(file, "{day_title} {dir:?} {params:?}");
-                
+
                 let values = collect_signal_to_pnl_values(&daily_events[i], &params);
                 let mut signal_sorted = values.signal.clone();
                 signal_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());

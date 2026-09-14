@@ -138,9 +138,9 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams, apply_filte
             if deal.is_completed() {
                 let (quantity, revenue, cost) = deal.close(false);
                 if revenue > cost {win += 1} else {loss += 1};
-                total_revenue += revenue * quantity as f64;
-                total_cost += cost * quantity as f64;
-                total_commission += commission(revenue, cost) * quantity as f64;
+                total_revenue += revenue;// * quantity as f64;
+                total_cost += cost;// * quantity as f64;
+                total_commission += commission(revenue, cost); // * quantity as f64;
                 cur_deal = None;
             }
         }

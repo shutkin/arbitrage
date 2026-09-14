@@ -2,16 +2,13 @@ use std::range::Range;
 use crate::deal::{Deal, DealDirection};
 use crate::math_utils::huber_loss;
 use crate::simulation::{find_order_books_on_horizon, run_simulation};
-use crate::{market_events_time_diapason, MarketEvent, OrderBookValues, commission};
+use crate::{market_events_time_diapason, MarketEvent, OrderBookValues, commission, IMBALANCE_LEVELS, DEFAULT_HOLD_MS};
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
 use chrono::TimeDelta;
 use log::{error, info};
 use ndarray::Array1;
 
-pub const IMBALANCE_LEVELS: [usize; 5] = [3, 5, 10, 20, 50];
-
-pub const DEFAULT_HOLD_MS: u16 = 300;
 const SOLVER_ITERATIONS: u64 = 8192;
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -37,16 +34,6 @@ impl SignalParamsDir {
                 imbalance1_weights: [array[2], array[3], array[4], array[5], array[6]],
                 imbalance2_weights: [array[7], array[8], array[9], array[10], array[11]],
             }
-        } else if array.len() == 4 {
-            Self {
-                threshold: 0.0,
-                c_range: Range::from(-1.0 .. 1.0),
-                a_range: Range::from(-1.0 .. 1.0),
-                derivative1_weight: array[0].max(0.0),
-                derivative2_weight: array[1],
-                imbalance1_weights: [0.0,0.0,0.0,0.0,0.0],
-                imbalance2_weights: [0.0,0.0,0.0,0.0,0.0],
-            }
         } else {
             Self {
                 threshold: array[0],
@@ -54,8 +41,8 @@ impl SignalParamsDir {
                 a_range: Range::from(-1.0 .. 1.0),
                 derivative1_weight: array[1].max(0.0),
                 derivative2_weight: array[2],
-                imbalance1_weights: [array[3], array[4], array[5], array[6], 0.0],
-                imbalance2_weights: [array[7], array[8], array[9], array[10], 0.0],
+                imbalance1_weights: [array[3], array[4], array[5], array[6], array[7]],
+                imbalance2_weights: [array[8], array[9], array[10], array[11], array[12]],
             }
         }
     }
@@ -63,7 +50,7 @@ impl SignalParamsDir {
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct SignalParams {
-    pub hold_ms: u16, // 250
+    pub hold_ms: u16,
     pub up: Option<SignalParamsDir>,
     pub down: Option<SignalParamsDir>,
 }
@@ -235,11 +222,11 @@ fn create_params_for_direction(p: &Array1<f64>, direction: DealDirection) -> Sig
     }
 }
 
-pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl, dir: DealDirection) -> SignalParams {
+pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl, dir: DealDirection, hold_time: u16) -> SignalParams {
     let initial = Array1::from_vec(
         if cost_function.optimize_threshold() {
-            //   A    D1   D2   I3   I5   I10  I20  I3   I5   I10  I20
-            vec![3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            //   A    D1   D2   I3   I5   I10  I20  I50  I3   I5   I10  I20  I50
+            vec![3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         } else {
             //   D1   D2   I3   I5   I10  I20  I50  I3   I5   I10  I20  I50
             vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -273,7 +260,7 @@ pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl,
             info!("Start optimization UP on events {} - {}", events[0].event_datetime(), events[events.len() - 1].event_datetime());
             let params_up = optimize(events, cost_function, DealDirection::Sell1Buy2, solver);
             SignalParams {
-                hold_ms: DEFAULT_HOLD_MS,
+                hold_ms: hold_time,
                 up: params_up,
                 down: None,
             }
@@ -283,7 +270,7 @@ pub fn calibrate_params(events: &[MarketEvent], cost_function: CostFunctionImpl,
             info!("Start optimization DOWN on events {} - {}", events[0].event_datetime(), events[events.len() - 1].event_datetime());
             let params_down = optimize(events, cost_function, DealDirection::Buy1Sell2, solver);
             SignalParams {
-                hold_ms: DEFAULT_HOLD_MS,
+                hold_ms: hold_time,
                 up: None,
                 down: params_down,
             }
