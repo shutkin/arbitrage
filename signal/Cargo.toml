@@ -1,0 +1,11 @@
+[package]
+name = "signal"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "./src/signal.rs"
+
+[dependencies]
+model = { path = "../model" }
+chrono = "0.4"
