@@ -195,7 +195,7 @@ fn filter_by_scores(score: f64, scores: &[f64]) -> bool {
 
 pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, latency: u32, log: bool) -> SimulationResult {
     let (mut win, mut loss) = (0, 0);
-    let (mut total_revenue, mut total_cost) = (0.0, 0.0);
+    let (mut total_revenue, mut total_cost, mut total_commission) = (0.0, 0.0, 0.0);
     let mut cur_deal = Option::<Deal>::None;
     let (mut last_order_book1, mut last_order_book2) = (None, None);
     let (mut last_deal1, mut last_deal2) = (None, None);
@@ -228,6 +228,7 @@ pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, l
                 if revenue > cost {win += 1} else {loss += 1};
                 total_revenue += revenue;
                 total_cost += cost;
+                total_commission += commission(revenue, cost);
                 cur_deal = None;
             }
         }
@@ -272,6 +273,6 @@ pub fn run_simulation_on_trades(events: &[MarketEvent], params: &SignalParams, l
         loss,
         income: total_revenue,
         outcome: total_cost,
-        commission: commission(total_revenue, total_cost),
+        commission: total_commission,
     }
 }

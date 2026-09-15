@@ -1,4 +1,3 @@
-mod order_book_cache;
 mod signal_optimization;
 mod math_utils;
 mod simulation;
@@ -11,18 +10,18 @@ use crate::deal::DealDirection;
 use crate::math_utils::{mean, median, standard_deviation};
 use crate::signal_optimization::{calibrate_params, calibrate_threshold, CostFunctionImpl, SignalParams};
 use crate::signals::{signal_huber_09_03, signal_huber_09_04, signal_huber_09_07, signal_huber_09_08, signal_huber_09_09, signal_huber_09_10};
-use crate::simulation::run_simulation;
+use crate::simulation::{run_simulation, run_simulation_on_trades};
 use crate::stats_collector::{daily_signal_to_pnl, deviation_to_spread_movement, trend_buckets, trend_to_pnl, DailyDataWithSignalParams, trend_ranges};
 use chrono::{DateTime, Datelike, TimeDelta, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::{info, warn};
 use model::common::{CommonError, EmptyResult, TimeDiapason};
-use model::{Instrument, OrderBook, Trade};
+use model::{order_book_cache, Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
 
 pub const IMBALANCE_LEVELS: [usize; 5] = [3, 5, 10, 20, 50];
-pub const DEFAULT_HOLD_MS: u16 = 300;
-const STD_DEVIATION_WINDOW_SECONDS: i64 = 950;
+pub const DEFAULT_HOLD_MS: u16 = 1100;
+const STD_DEVIATION_WINDOW_SECONDS: i64 = 1050;
 const TREND_TAU_SECONDS: f64 = 1.0 * 60.0;
 
 pub fn commission(revenue: f64, cost: f64) -> f64 {
@@ -70,82 +69,80 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-        //for hold_time in [200, 300, 500, 1000, 1500, 3000, 5000, 10_000] {
-        for i in 0..=10 {
-            let hold_time = 500 + i * 100;
-            //let std_deviation_diapason = 750 + i * 100;
-            let mut train_events = Vec::<MarketEvent>::new();
-            let mut diapasons = Vec::new();
-            let mut total_profit = 0.0;
+        let mut train_events = Vec::<MarketEvent>::new();
+        let mut diapasons = Vec::new();
+        let mut total_profit = 0.0;
 
-            let mut diapason = TimeDiapason::new(
-                DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
-                DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
-            );
-            for day in 3..12 {
-                if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
-                    info!("DAY {day}");
-                    diapasons.push(diapason);
+        let mut diapason = TimeDiapason::new(
+            DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
+        );
+        for day in 3..15 {
+            if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
+                info!("DAY {day}");
+                diapasons.push(diapason);
 
-                    let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
-                    let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
-                    convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
-                    info!("Calculate std deviations with window {STD_DEVIATION_WINDOW_SECONDS}");
-                    calculate_std_deviations(&mut all_values2, STD_DEVIATION_WINDOW_SECONDS);
-                    calculate_std_deviations(&mut all_values1, STD_DEVIATION_WINDOW_SECONDS);
-                    info!("Calculate trends");
-                    calculate_trend(&mut all_values1);
-                    calculate_trend(&mut all_values2);
-                    let day_events = merge_events(&all_values1, &all_values2, &[], &[]);
+                let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
+                let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
+                convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
+                info!("Calculate std deviations with window {STD_DEVIATION_WINDOW_SECONDS}");
+                calculate_std_deviations(&mut all_values2, STD_DEVIATION_WINDOW_SECONDS);
+                calculate_std_deviations(&mut all_values1, STD_DEVIATION_WINDOW_SECONDS);
+                info!("Calculate trends");
+                calculate_trend(&mut all_values1);
+                calculate_trend(&mut all_values2);
 
-                    if !train_events.is_empty() {
-                        if diapasons.len() > 2 {
-                            let train_start = diapasons[diapasons.len() - 3].from;
-                            train_events.retain(|event| event.event_datetime() >= train_start);
-                        }
+                let trades1 = db.get_trades(inst1_id, diapason).await?;
+                let trades2 = db.get_trades(inst1_id, diapason).await?;
 
-                        info!("Train on {} events", train_events.len());
-                        let events_clone1 = train_events.clone();
-                        let events_clone2 = train_events.clone();
-                        let handle_up = thread::spawn(move || {
-                            let params = calibrate_params(&events_clone1, CostFunctionImpl::TradingSimulation, DealDirection::Sell1Buy2, hold_time);
-                            //calibrate_threshold(&events_clone1, params.up.unwrap(), DealDirection::Sell1Buy2)
-                            Some(params)
-                        });
-                        let handle_down = thread::spawn(move || {
-                            let params = calibrate_params(&events_clone2, CostFunctionImpl::TradingSimulation, DealDirection::Buy1Sell2, hold_time);
-                            //calibrate_threshold(&events_clone2, params.down.unwrap(), DealDirection::Buy1Sell2)
-                            Some(params)
-                        });
-                        let up = handle_up.join().unwrap();
-                        let down = handle_down.join().unwrap();
-                        if let Some(up) = up && let Some(down) = down {
-                            let params = SignalParams {
-                                hold_ms: up.hold_ms,
-                                up: up.up,
-                                down: down.down,
-                            };
-                            let result = run_simulation(&day_events, &params, false);
-                            info!(
-                            "{}: income {}, outcome {}, commission {}, profit {}",
+                let day_events = merge_events(&all_values1, &all_values2, &trades1, &trades2);
+
+                if !train_events.is_empty() {
+                    if diapasons.len() > 2 {
+                        let train_start = diapasons[diapasons.len() - 3].from;
+                        train_events.retain(|event| event.event_datetime() >= train_start);
+                    }
+
+                    info!("Train on {} events", train_events.len());
+                    let events_clone1 = train_events.clone();
+                    let events_clone2 = train_events.clone();
+                    let handle_up = thread::spawn(move || {
+                        let params = calibrate_params(&events_clone1, CostFunctionImpl::TradingSimulation, DealDirection::Sell1Buy2, DEFAULT_HOLD_MS);
+                        Some(params)
+                    });
+                    let handle_down = thread::spawn(move || {
+                        let params = calibrate_params(&events_clone2, CostFunctionImpl::TradingSimulation, DealDirection::Buy1Sell2, DEFAULT_HOLD_MS);
+                        Some(params)
+                    });
+                    let up = handle_up.join().unwrap();
+                    let down = handle_down.join().unwrap();
+                    if let Some(up) = up && let Some(down) = down {
+                        let params = SignalParams {
+                            hold_ms: up.hold_ms,
+                            up: up.up,
+                            down: down.down,
+                        };
+                        let result = run_simulation_on_trades(&day_events, &params, 50, false);
+                        info!(
+                            "{}: deals {}, income {}, outcome {}, commission {}, profit {}",
                             diapason.from.date_naive(),
+                            result.win + result.loss,
                             result.income,
                             result.outcome,
                             result.commission,
                             result.income - result.outcome - result.commission,
                         );
-                            total_profit += result.income - result.outcome - result.commission;
-                        }
+                        total_profit += result.income - result.outcome - result.commission;
                     }
-
-                    train_events.extend(day_events);
                 }
 
-                diapason.from += TimeDelta::days(1);
-                diapason.to += TimeDelta::days(1);
+                train_events.extend(day_events);
             }
-            warn!("{hold_time} total profit: {total_profit}");
+
+            diapason.from += TimeDelta::days(1);
+            diapason.to += TimeDelta::days(1);
         }
+        warn!("Total profit: {total_profit}");
     }
     Ok(())
 }
@@ -504,15 +501,11 @@ fn calculate_trend(values: &mut [OrderBookValues]) {
 
     for value in values.iter_mut() {
         if let Some(cur_prev_time) = prev_time {
-            //if value.time > cur_prev_time {
-                let dt = (value.time - cur_prev_time).as_seconds_f64();
-                let alpha = 1.0 - (-dt / TREND_TAU_SECONDS).exp();
-                trend += alpha * (value.std_derivative - trend);
-                value.trend = trend;
-                prev_time = Some(value.time);
-            //} else {
-            //    value.trend = trend;
-            //}
+            let dt = (value.time - cur_prev_time).as_seconds_f64();
+            let alpha = 1.0 - (-dt / TREND_TAU_SECONDS).exp();
+            trend += alpha * (value.std_derivative - trend);
+            value.trend = trend;
+            prev_time = Some(value.time);
         } else {
             trend = value.std_derivative;
             value.trend = trend;

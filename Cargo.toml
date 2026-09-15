@@ -3,6 +3,7 @@ members = [
     "bybit",
     "cleaner",
     "db",
+    "exp_single",
     "experiment",
     "listener",
     "model",

@@ -1156,11 +1156,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "exp_single"
+version = "0.1.0"
+dependencies = [
+ "argmin",
+ "chrono",
+ "correlation",
+ "db",
+ "dotenv",
+ "log",
+ "model",
+ "ndarray",
+ "simplelog",
+ "tokio",
+]
+
+[[package]]
 name = "experiment"
 version = "0.1.0"
 dependencies = [
  "argmin",
- "bincode",
  "chrono",
  "correlation",
  "db",
@@ -2520,6 +2535,7 @@ dependencies = [
 name = "model"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "chrono",
  "rust_decimal",
  "serde",
