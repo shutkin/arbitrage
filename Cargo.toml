@@ -7,6 +7,8 @@ members = [
     "experiment",
     "listener",
     "model",
+    "signal",
+    "signal_test",
     "tinvest",
     "viewer",
 ]

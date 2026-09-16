@@ -103,13 +103,13 @@ pub fn run_stats(events: &[MarketEvent], params: &SignalParams, deal_handler: &m
     deal_handler.get_stats()
 }
 
-pub fn run_simulation(events: &[MarketEvent], params: &SignalParams, apply_filters: bool) -> SimulationResult {
+pub fn run_simulation(events: &[MarketEvent], params: &SignalParams, log: bool) -> SimulationResult {
     let (mut win, mut loss) = (0, 0);
     let (mut total_revenue, mut total_cost, mut total_commission) = (0.0, 0.0, 0.0);
     let mut cur_deal = Option::<Deal>::None;
     let (mut last_order_book1, mut last_order_book2) = (None, None);
     let mut prev_signal = Signal::None;
-    let mut scores = Vec::new();
+    //let mut scores = Vec::new();
 
     for event in events {
         match event {
@@ -122,21 +122,21 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams, apply_filte
             if let Some(v) = last_order_book1 &&
                 v.time > deal.get_open_time() + TimeDelta::milliseconds(params.hold_ms as i64) {
                 let price = match deal.get_direction() {
-                    DealDirection::Sell1Buy2 => v.bid,
-                    DealDirection::Buy1Sell2 => v.ask,
+                    DealDirection::Sell1Buy2 => v.ask,
+                    DealDirection::Buy1Sell2 => v.bid,
                 };
                 deal.close_instrument1(price, v.time)
             }
             if let Some(v) = last_order_book2 &&
                 v.time > deal.get_open_time() + TimeDelta::milliseconds(params.hold_ms as i64) {
                 let price = match deal.get_direction() {
-                    DealDirection::Sell1Buy2 => v.ask,
-                    DealDirection::Buy1Sell2 => v.bid,
+                    DealDirection::Sell1Buy2 => v.bid,
+                    DealDirection::Buy1Sell2 => v.ask,
                 };
                 deal.close_instrument2(price, v.time)
             }
             if deal.is_completed() {
-                let (quantity, revenue, cost) = deal.close(false);
+                let (quantity, revenue, cost) = deal.close(log);
                 if revenue > cost {win += 1} else {loss += 1};
                 total_revenue += revenue;// * quantity as f64;
                 total_cost += cost;// * quantity as f64;
@@ -149,7 +149,7 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams, apply_filte
             let (cur_signal, score) = params.signal(values1, values2);
 
             if cur_deal.is_none() &&
-                (!apply_filters || TrendFilter::filter(values1, values2) && filter_by_scores(score, &scores)) &&
+                //(!apply_filters || TrendFilter::filter(values1, values2) && filter_by_scores(score, &scores)) &&
                 cur_signal != prev_signal {
                 cur_deal = match cur_signal {
                     Signal::None => None,
@@ -164,12 +164,12 @@ pub fn run_simulation(events: &[MarketEvent], params: &SignalParams, apply_filte
 
             prev_signal = cur_signal;
             
-            if apply_filters {
+            /*if apply_filters {
                 scores.push(score);
                 if scores.len() > 32768 {
                     scores.remove(0);
                 }
-            }
+            }*/
         }
     }
     SimulationResult {

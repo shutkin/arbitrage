@@ -28,23 +28,6 @@ pub fn positive_percentile(data: &[f64]) -> f64 {
     100.0 * positive / data.len() as f64
 }
 
-pub fn standard_deviation(data: &[f64]) -> Option<f64> {
-    let count = data.len();
-    if count < 2 {
-        return None;
-    }
-
-    let mean = data.iter().sum::<f64>() / count as f64;
-    let variance = data.iter()
-        .map(|value| {
-            let diff = value - mean;
-            diff * diff
-        })
-        .sum::<f64>() / count as f64;
-
-    Some(variance.sqrt())
-}
-
 fn calc_derivative(values: &[OrderBookValues], i: usize) -> f64 {
     if i < 1 {
         return 0.0;
@@ -58,35 +41,6 @@ fn calc_derivative(values: &[OrderBookValues], i: usize) -> f64 {
         pi -= 1;
     }
     (values[i].mid - values[pi].mid) / (values[i].time.timestamp_millis() - values[pi].time.timestamp_millis()) as f64
-}
-
-pub fn std_derivative_old(values: &[OrderBookValues], i: usize) -> f64 {
-    if i < 2 {
-        return 0.0;
-    }
-
-    let mut pi = i - 1;
-    let avg_period_start = values[i].time - TimeDelta::seconds(5 * 60);
-    let mut window_values = Vec::new();
-    while pi > 1 && values[pi].time > avg_period_start {
-        let derivative = calc_derivative(values, pi);
-        window_values.push(derivative);
-        pi -= 1;
-    }
-    if let Some(std) = standard_deviation(&window_values) {
-        let derivative = calc_derivative(values, i);
-        if std.abs() < 0.0000001 {
-            return if derivative < 0.0 { -DEVIATION_MAX_VALUE } else { DEVIATION_MAX_VALUE };
-        }
-        let n = derivative / std;
-        n
-        //n.clamp(-DEVIATION_MAX_VALUE, DEVIATION_MAX_VALUE)
-        //n / DEVIATION_MAX_VALUE
-        //let l = (n.abs() * 2.0 / DEVIATION_MAX_VALUE).log2();
-        //if n < 0.0 {-l} else {l}
-    } else {
-        0.0
-    }
 }
 
 pub fn percentile(values: &[OrderBookValues], i: usize) -> f64 {

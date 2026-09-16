@@ -444,7 +444,7 @@ pub fn calibrate_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, 
     Some(dir_params)
 }
 
-fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, dir: DealDirection) -> Option<f64> {
+pub fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, dir: DealDirection) -> Option<f64> {
     let params = SignalParams {
         hold_ms: DEFAULT_HOLD_MS,
         up: if matches!(dir, DealDirection::Sell1Buy2) {Some(params_dir)} else {None},
@@ -462,12 +462,12 @@ fn find_threshold(events: &[MarketEvent], params_dir: SignalParamsDir, dir: Deal
     const LEVELS: usize = 16384;
 
     if filtered_signal_values.len() > 1000 {
-        let expected_deals = market_events_time_diapason(events).num_minutes() as u32 / 5;
+        let expected_deals = market_events_time_diapason(events).num_minutes() as u32 / 60;
         info!("Expected deals {expected_deals}");
 
         filtered_signal_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let min_signal = filtered_signal_values[40];
-        let max_signal = filtered_signal_values[filtered_signal_values.len() - 40];
+        let min_signal = filtered_signal_values[5];
+        let max_signal = filtered_signal_values[filtered_signal_values.len() - 5];
         info!("Signal min {min_signal} and max {max_signal}");
         let mut best_profit = f64::NAN;
         let mut best_threshold = 0.0;

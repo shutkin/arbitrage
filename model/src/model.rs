@@ -1,6 +1,7 @@
 pub mod utils;
 pub mod events;
 pub mod common;
+pub mod math_util;
 pub mod order_book_cache;
 
 use chrono::{DateTime, Utc};

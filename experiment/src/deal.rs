@@ -9,6 +9,8 @@ pub enum DealDirection {
 #[derive(Copy, Clone)]
 pub struct Deal {
     direction: DealDirection,
+    open_time1: DateTime<Utc>,
+    open_time2: DateTime<Utc>,
     open_time: DateTime<Utc>,
     quantity: u16,
     entry_price1: f64,
@@ -22,6 +24,8 @@ pub struct Deal {
 impl Deal {
     pub fn sell1_buy2(v1: &OrderBookValues, v2: &OrderBookValues) -> Self {
         Self {
+            open_time1: v1.time,
+            open_time2: v2.time,
             open_time: v1.time.max(v2.time),
             direction: DealDirection::Sell1Buy2,
 
@@ -42,6 +46,8 @@ impl Deal {
 
     pub fn buy1_sell2(v1: &OrderBookValues, v2: &OrderBookValues) -> Self {
         Self {
+            open_time1: v1.time,
+            open_time2: v2.time,
             open_time: v1.time.max(v2.time),
             direction: DealDirection::Buy1Sell2,
 
@@ -115,11 +121,12 @@ impl Deal {
 
                     if log {
                         println!(
-                            "sell GLU6 @ {} buy GLZ6 @ {} at {} -> buy GLU6 @ {} at {} sell GLZ6 {} at {}, revenue {}, cost {}",
-                            self.entry_price1, self.entry_price2, self.open_time,
+                            "sell 1 @ {} at {} buy 2 @ {} at {} -> buy 1 @ {} at {} sell 2 {} at {}, revenue {}, cost {}",
+                            self.entry_price1, self.open_time1, self.entry_price2, self.open_time2,
                             p1, close_time1, p2, close_time2,
                             revenue, cost,
                         );
+                        println!("Profit {}", revenue - cost);
                     }
 
                     (self.quantity, revenue, cost)
@@ -131,11 +138,12 @@ impl Deal {
 
                     if log {
                         println!(
-                            "Buy GLU6 @ {} sell GLZ6 @ {} at {} -> sell GLU6 @ {} at {} buy GLZ6 @ {} at {}, revenue {}, cost {}",
-                            self.entry_price1, self.entry_price2, self.open_time,
+                            "Buy 1 @ {} at {} sell 2 @ {} at {} -> sell 1 @ {} at {} buy 2 @ {} at {}, revenue {}, cost {}",
+                            self.entry_price1, self.open_time1, self.entry_price2, self.open_time2,
                             p1, close_time1, p2, close_time2,
                             revenue, cost,
                         );
+                        println!("Profit {}", revenue - cost);
                     }
 
                     (self.quantity, revenue, cost)

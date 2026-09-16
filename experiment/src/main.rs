@@ -5,10 +5,11 @@ mod stats_collector;
 mod deal;
 mod signals;
 
+use std::range::Range;
 use std::thread;
 use crate::deal::DealDirection;
-use crate::math_utils::{mean, median, standard_deviation};
-use crate::signal_optimization::{calibrate_params, calibrate_threshold, CostFunctionImpl, SignalParams};
+use crate::math_utils::{mean, median};
+use crate::signal_optimization::{calibrate_params, calibrate_threshold, CostFunctionImpl, SignalParams, SignalParamsDir, find_threshold};
 use crate::signals::{signal_huber_09_03, signal_huber_09_04, signal_huber_09_07, signal_huber_09_08, signal_huber_09_09, signal_huber_09_10};
 use crate::simulation::{run_simulation, run_simulation_on_trades};
 use crate::stats_collector::{daily_signal_to_pnl, deviation_to_spread_movement, trend_buckets, trend_to_pnl, DailyDataWithSignalParams, trend_ranges};
@@ -18,6 +19,7 @@ use log::{info, warn};
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::{order_book_cache, Instrument, OrderBook, Trade};
 use simplelog::{LevelFilter, SimpleLogger};
+use model::math_util::standard_deviation;
 
 pub const IMBALANCE_LEVELS: [usize; 5] = [3, 5, 10, 20, 50];
 pub const DEFAULT_HOLD_MS: u16 = 1100;
@@ -74,10 +76,10 @@ async fn main() -> EmptyResult {
         let mut total_profit = 0.0;
 
         let mut diapason = TimeDiapason::new(
-            DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
-            DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-07T05:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-07T20:00:00Z")?.to_utc(),
         );
-        for day in 3..15 {
+        for day in 7..16 {
             if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
                 info!("DAY {day}");
                 diapasons.push(diapason);
@@ -92,10 +94,10 @@ async fn main() -> EmptyResult {
                 calculate_trend(&mut all_values1);
                 calculate_trend(&mut all_values2);
 
-                let trades1 = db.get_trades(inst1_id, diapason).await?;
-                let trades2 = db.get_trades(inst1_id, diapason).await?;
+                //let trades1 = db.get_trades(inst1_id, diapason).await?;
+                //let trades2 = db.get_trades(inst1_id, diapason).await?;
 
-                let day_events = merge_events(&all_values1, &all_values2, &trades1, &trades2);
+                let day_events = merge_events(&all_values1, &all_values2, &[], &[]);
 
                 if !train_events.is_empty() {
                     if diapasons.len() > 2 {
@@ -107,11 +109,19 @@ async fn main() -> EmptyResult {
                     let events_clone1 = train_events.clone();
                     let events_clone2 = train_events.clone();
                     let handle_up = thread::spawn(move || {
-                        let params = calibrate_params(&events_clone1, CostFunctionImpl::TradingSimulation, DealDirection::Sell1Buy2, DEFAULT_HOLD_MS);
+                        let mut params = calibrate_params(&events_clone1, CostFunctionImpl::HuberLoss, DealDirection::Sell1Buy2, DEFAULT_HOLD_MS);
+                        if let Some(t) = find_threshold(&events_clone1, params.up.unwrap(), DealDirection::Sell1Buy2)
+                            && let Some(p) = params.up.as_mut() {
+                            p.threshold = t;
+                        }
                         Some(params)
                     });
                     let handle_down = thread::spawn(move || {
-                        let params = calibrate_params(&events_clone2, CostFunctionImpl::TradingSimulation, DealDirection::Buy1Sell2, DEFAULT_HOLD_MS);
+                        let mut params = calibrate_params(&events_clone2, CostFunctionImpl::HuberLoss, DealDirection::Buy1Sell2, DEFAULT_HOLD_MS);
+                        if let Some(t) = find_threshold(&events_clone2, params.down.unwrap(), DealDirection::Buy1Sell2)
+                            && let Some(p) = params.down.as_mut() {
+                            p.threshold = t;
+                        }
                         Some(params)
                     });
                     let up = handle_up.join().unwrap();
@@ -122,7 +132,8 @@ async fn main() -> EmptyResult {
                             up: up.up,
                             down: down.down,
                         };
-                        let result = run_simulation_on_trades(&day_events, &params, 50, false);
+                        info!("{params:?}");
+                        let result = run_simulation(&day_events, &params, false);
                         info!(
                             "{}: deals {}, income {}, outcome {}, commission {}, profit {}",
                             diapason.from.date_naive(),
