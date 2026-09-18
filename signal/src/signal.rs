@@ -11,7 +11,9 @@ use log::{debug, error};
 use model::OrderBook;
 use std::thread;
 
-const TRAIN_VALUES_SIZE: usize = 2 * 2 * 30000;
+const ORDER_BOOKS_PER_HOUR: usize = 24000;
+const TRAIN_DATA_MINUTES: u16 = 60;
+const TRAIN_INTERVAL_MINUTES: u16 = 5;
 
 const STD_DIAPASON_SECONDS: u16 = 1050;
 const HOLD_TIME_MS: u16 = 1100;
@@ -23,12 +25,31 @@ pub enum TradeSignal {
     Buy1Sell2(u16),
 }
 
+pub struct SignalConfig {
+    std_diapason_s: u16,
+    hold_time_ms: u16,
+    train_data_minutes: u16,
+    train_interval_minutes: u16,
+    min_profit_per_deal: f64,
+}
+
+impl Default for SignalConfig {
+    fn default() -> Self {
+        Self {
+            std_diapason_s: STD_DIAPASON_SECONDS,
+            hold_time_ms: HOLD_TIME_MS,
+            train_data_minutes: TRAIN_DATA_MINUTES,
+            train_interval_minutes: TRAIN_INTERVAL_MINUTES,
+            min_profit_per_deal: 1.0,
+        }
+    }
+}
+
 pub struct Signal {
     ticker1: String,
     ticker2: String,
 
-    std_diapason_s: u16,
-    hold_time_ms: u16,
+    config: SignalConfig,
 
     values1_calculator: WindowValuesCalculator,
     values2_calculator: WindowValuesCalculator,
@@ -43,8 +64,7 @@ impl Signal {
         Self {
             ticker1: ticker1.to_string(),
             ticker2: ticker2.to_string(),
-            std_diapason_s: STD_DIAPASON_SECONDS,
-            hold_time_ms: HOLD_TIME_MS,
+            config: SignalConfig::default(),
 
             values1_calculator: WindowValuesCalculator::new(Leg::First),
             values2_calculator: WindowValuesCalculator::new(Leg::Second),
@@ -75,9 +95,9 @@ impl Signal {
 
     pub fn process(&mut self, ticker: &str, order_book: &OrderBook) -> TradeSignal {
         let v = if self.ticker1 == ticker {
-            self.values1_calculator.calculate(order_book, self.std_diapason_s)
+            self.values1_calculator.calculate(order_book, self.config.std_diapason_s)
         } else if self.ticker2 == ticker {
-            self.values2_calculator.calculate(order_book, self.std_diapason_s)
+            self.values2_calculator.calculate(order_book, self.config.std_diapason_s)
         } else {
             return TradeSignal::None;
         };
@@ -85,26 +105,30 @@ impl Signal {
 
         if let Some(calculator) = &self.calculator
             && let Some((v1, v2)) = self.get_last_values() {
-            calculator.calculate(v1, v2, self.hold_time_ms)
+            calculator.calculate(v1, v2, self.config.hold_time_ms)
         } else {
             TradeSignal::None
         }
     }
     
     pub fn calibrate(&mut self) {
-        if self.buffer.len() < TRAIN_VALUES_SIZE {
+        let train_values_size = self.get_train_values_size();
+        if self.buffer.len() < train_values_size {
             return;
         }
 
         let last_time = self.buffer[self.buffer.len() - 1].time;
-        if self.calculator.as_ref().map(|calc| last_time - calc.get_created_on() > TimeDelta::minutes(5)).unwrap_or(true) {
+        if self.calculator.as_ref()
+            .map(|calc| last_time - calc.get_created_on() > TimeDelta::minutes(self.config.train_interval_minutes as i64))
+            .unwrap_or(true) {
             self.shrink_buffer();
 
-            let hold_time = self.hold_time_ms;
+            let hold_time = self.config.hold_time_ms;
+            let min_profit_per_deal = self.config.min_profit_per_deal;
 
             let buf_clone = self.buffer.clone();
             let thread_up = thread::spawn(move || {
-                match calibrate_signal_calculator(&buf_clone, true, hold_time) {
+                match calibrate_signal_calculator(&buf_clone, true, hold_time, min_profit_per_deal) {
                     Ok(calc) => Some(calc),
                     Err(err) => {
                         error!("Failed to optimize UP calculator: {err}");
@@ -115,7 +139,7 @@ impl Signal {
 
             let buf_clone = self.buffer.clone();
             let thread_down = thread::spawn(move || {
-                match calibrate_signal_calculator(&buf_clone, false, hold_time) {
+                match calibrate_signal_calculator(&buf_clone, false, hold_time, min_profit_per_deal) {
                     Ok(calc) => Some(calc),
                     Err(err) => {
                         error!("Failed to optimize DOWN calculator: {err}");
@@ -133,10 +157,15 @@ impl Signal {
             }
         }
     }
+    
+    fn get_train_values_size(&self) -> usize {
+        self.config.train_data_minutes as usize * ORDER_BOOKS_PER_HOUR / 30
+    }
 
     fn shrink_buffer(&mut self) {
-        if self.buffer.len() > TRAIN_VALUES_SIZE + 1 {
-            let to_delete = self.buffer.len() - TRAIN_VALUES_SIZE - 1;
+        let train_values_size = self.get_train_values_size();
+        if self.buffer.len() > train_values_size + 1 {
+            let to_delete = self.buffer.len() - train_values_size - 1;
             self.buffer.drain(0..to_delete);
         }
     }

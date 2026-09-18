@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, TimeDelta, Utc};
+use chrono::{DateTime, Datelike, TimeDelta, Timelike, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::{debug, info, LevelFilter};
 use model::common::{CommonError, EmptyResult, TimeDiapason};
@@ -134,6 +134,7 @@ async fn main() -> EmptyResult {
     let db = db::Db::new(&db_url).await?;
 
     let tickers = ["GLU6", "GLZ6"];
+    //let tickers = ["GLZ6", "GLH7"];
 
     let mut signal = Signal::new(tickers[0], tickers[1]);
     let all_instruments = db.get_instruments(false).await?;
@@ -142,14 +143,20 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
         let mut diapason = TimeDiapason::new(
-            DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
-            DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-07T05:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-07T20:00:00Z")?.to_utc(),
         );
+        let end = DateTime::parse_from_rfc3339("2026-09-17T00:00:00Z")?.to_utc();
+        //let mut diapason = TimeDiapason::new(
+        //    DateTime::parse_from_rfc3339("2026-09-17T05:00:00Z")?.to_utc(),
+        //    DateTime::parse_from_rfc3339("2026-09-17T20:00:00Z")?.to_utc(),
+        //);
+        //let end = Utc::now();
 
         let (mut total_income, mut total_outcome, mut total_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
         let mut active_deal = Option::<TestDeal>::None;
 
-        while diapason.to + TimeDelta::days(1) < Utc::now() {
+        while diapason.to < end {
             if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
                 info!("DAY {}", diapason.from.date_naive());
                 let (mut daily_income, mut daily_outcome, mut daily_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
@@ -160,8 +167,14 @@ async fn main() -> EmptyResult {
 
                 let events = merge_events(&order_books1, &order_books2);
 
+                let mut prev_hour = events[0].order_book.timestamp.hour();
                 let (mut last_ob1, mut last_ob2) = (None, None);
                 for (i, event) in events.iter().enumerate() {
+                    if event.order_book.timestamp.hour() != prev_hour {
+                        prev_hour = event.order_book.timestamp.hour();
+                        info!("Hour {prev_hour}");
+                    }
+
                     signal.calibrate();
                     let trade_signal = signal.process(
                         if event.is_first_leg {tickers[0]} else {tickers[1]},

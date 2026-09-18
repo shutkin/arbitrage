@@ -17,6 +17,7 @@ pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, 
     let (mut v1, mut v2) = (None, None);
     let mut active_deal = Option::<SimDeal>::None;
     let (mut total_revenue, mut total_cost, mut total_commission) = (0.0, 0.0, 0.0);
+    let mut deals_count = 0;
 
     for value in values {
         match value.leg {
@@ -58,6 +59,7 @@ pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, 
                     total_revenue += revenue;
                     total_cost += cost;
                     total_commission += 5.0;
+                    deals_count += 1;
                 }
 
             } else {

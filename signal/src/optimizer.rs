@@ -26,12 +26,17 @@ impl CostFunction for TradeSimProblem<'_> {
             CalculatorsPair::new_down(calculator, last_time)
         };
 
-        let profit = run_simulation(self.values, &pair, self.hold_time_ms);
-        Ok(-profit)
+        let profit_per_deal = run_simulation(self.values, &pair, self.hold_time_ms);
+        Ok(-profit_per_deal)
     }
 }
 
-pub fn calibrate_signal_calculator(values: &[OrderBookValues], is_up: bool, hold_time_ms: u16) -> Result<Option<SignalCalculator>, CommonError> {
+pub fn calibrate_signal_calculator(
+    values: &[OrderBookValues],
+    is_up: bool,
+    hold_time_ms: u16,
+    min_profit_per_deal: f64,
+) -> Result<Option<SignalCalculator>, CommonError> {
     let initial = Array1::from_vec(
         //      A    D1   D2   I3   I5   I10  I20  I50  I3   I5   I10  I20  I50
         vec![3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -61,7 +66,7 @@ pub fn calibrate_signal_calculator(values: &[OrderBookValues], is_up: bool, hold
         .run()?;
     let best_profit = -result.state().get_best_cost();
     debug!("{} best profit {best_profit}", if is_up {"UP"} else {"DOWN"});
-    if best_profit > 0.0 {
+    if best_profit > min_profit_per_deal {
         let param = result.state().get_best_param().ok_or("Failed to get best param")?;
         Ok(Some(SignalCalculator::from_optimizer_param(param)))
     } else {
