@@ -13,7 +13,7 @@ struct SimDeal {
     close_price2: Option<f64>,
 }
 
-pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, hold_time_ms: u16) -> f64 {
+pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, hold_time_ms: u16) -> (u32, f64) {
     let (mut v1, mut v2) = (None, None);
     let mut active_deal = Option::<SimDeal>::None;
     let (mut total_revenue, mut total_cost, mut total_commission) = (0.0, 0.0, 0.0);
@@ -93,5 +93,5 @@ pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, 
         }
     }
 
-    total_revenue - total_cost - total_commission
+    (deals_count, total_revenue - total_cost - total_commission)
 }

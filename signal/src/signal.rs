@@ -11,7 +11,6 @@ use log::{debug, error};
 use model::OrderBook;
 use std::thread;
 
-const ORDER_BOOKS_PER_HOUR: usize = 24000;
 const TRAIN_DATA_MINUTES: u16 = 60;
 const TRAIN_INTERVAL_MINUTES: u16 = 5;
 
@@ -26,11 +25,11 @@ pub enum TradeSignal {
 }
 
 pub struct SignalConfig {
-    std_diapason_s: u16,
-    hold_time_ms: u16,
-    train_data_minutes: u16,
-    train_interval_minutes: u16,
-    min_profit_per_deal: f64,
+    pub std_diapason_s: u16,
+    pub hold_time_ms: u16,
+    pub train_data_minutes: u16,
+    pub train_interval_minutes: u16,
+    pub min_profit_per_deal: f64,
 }
 
 impl Default for SignalConfig {
@@ -40,7 +39,7 @@ impl Default for SignalConfig {
             hold_time_ms: HOLD_TIME_MS,
             train_data_minutes: TRAIN_DATA_MINUTES,
             train_interval_minutes: TRAIN_INTERVAL_MINUTES,
-            min_profit_per_deal: 1.0,
+            min_profit_per_deal: 0.0,
         }
     }
 }
@@ -65,6 +64,21 @@ impl Signal {
             ticker1: ticker1.to_string(),
             ticker2: ticker2.to_string(),
             config: SignalConfig::default(),
+
+            values1_calculator: WindowValuesCalculator::new(Leg::First),
+            values2_calculator: WindowValuesCalculator::new(Leg::Second),
+
+            calculator: None,
+
+            buffer: Vec::new(),
+        }
+    }
+
+    pub fn new_with_config(ticker1: &str, ticker2: &str, config: SignalConfig) -> Self {
+        Self {
+            ticker1: ticker1.to_string(),
+            ticker2: ticker2.to_string(),
+            config,
 
             values1_calculator: WindowValuesCalculator::new(Leg::First),
             values2_calculator: WindowValuesCalculator::new(Leg::Second),
@@ -111,9 +125,19 @@ impl Signal {
         }
     }
     
+    pub fn inform_deal_result(&mut self, trade_signal: TradeSignal, profit: f64) {
+        if let Some(calc) = self.calculator.as_mut() {
+            calc.deal_performance(trade_signal, profit);
+        }
+    }
+    
     pub fn calibrate(&mut self) {
-        let train_values_size = self.get_train_values_size();
-        if self.buffer.len() < train_values_size {
+        if self.buffer.len() < 2 {
+            return;
+        }
+        let delta = self.buffer[self.buffer.len() - 1].time - self.buffer[0].time;
+        let buf_minutes = delta.num_minutes() as u16;
+        if buf_minutes < self.config.train_data_minutes - 1 {
             return;
         }
 
@@ -122,6 +146,42 @@ impl Signal {
             .map(|calc| last_time - calc.get_created_on() > TimeDelta::minutes(self.config.train_interval_minutes as i64))
             .unwrap_or(true) {
             self.shrink_buffer();
+
+            if let Some(calc) = &self.calculator {
+                let (perf_up, perf_down) = calc.get_performances();
+                /*let pnl_up = format!("{:.1} [{:.1} {:.1} {:.1} {:.1}]", perf_up.training_total_pnl,
+                                     perf_up.training_windows_pnl[0], perf_up.training_windows_pnl[1],
+                                     perf_up.training_windows_pnl[2], perf_up.training_windows_pnl[3]);
+                let pnl_down = format!("{:.1} [{:.1} {:.1} {:.1} {:.1}]", perf_down.training_total_pnl,
+                                     perf_down.training_windows_pnl[0], perf_down.training_windows_pnl[1],
+                                     perf_down.training_windows_pnl[2], perf_down.training_windows_pnl[3]);
+                let leg1_v = (perf_up.leg1_volatility + perf_down.leg1_volatility) * 0.5;
+                let leg2_v = (perf_up.leg2_volatility + perf_down.leg2_volatility) * 0.5;
+                let spread_v = (perf_up.spread_volatility + perf_down.spread_volatility) * 0.5;
+                if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("signal_performance.csv") {
+                    let _ = writeln!(
+                        file, "{},{},{},{:.1},{},{},{:.1},{:.5},{:.5},{:.5},{:.5}",
+                        calc.get_created_on(),
+                        perf_up.training_deals,
+                        pnl_up,
+                        perf_up.actual_total_pnl,
+                        perf_down.training_deals,
+                        pnl_down,
+                        perf_down.actual_total_pnl,
+                        leg1_v, leg2_v, spread_v,
+                        spread_v / (leg1_v + leg2_v),
+                    );
+                }
+
+                if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("training_buckets_pnl.csv") {
+                    let _ = writeln!(
+                        file, "{:?},{:?},{:?},{:?},{:?}",
+                        perf_up.training_windows_pnl[0], perf_up.training_windows_pnl[1],
+                        perf_up.training_windows_pnl[2], perf_up.training_windows_pnl[3],
+                        perf_up.actual_total_pnl,
+                    );
+                }*/
+            }
 
             let hold_time = self.config.hold_time_ms;
             let min_profit_per_deal = self.config.min_profit_per_deal;
@@ -157,15 +217,15 @@ impl Signal {
             }
         }
     }
-    
-    fn get_train_values_size(&self) -> usize {
-        self.config.train_data_minutes as usize * ORDER_BOOKS_PER_HOUR / 30
-    }
 
     fn shrink_buffer(&mut self) {
-        let train_values_size = self.get_train_values_size();
-        if self.buffer.len() > train_values_size + 1 {
-            let to_delete = self.buffer.len() - train_values_size - 1;
+        let threshold = self.buffer[self.buffer.len() - 1].time - TimeDelta::minutes(self.config.train_data_minutes as i64);
+        let mut to_delete = 0;
+        while to_delete < self.buffer.len() && self.buffer[to_delete].time < threshold {
+            to_delete += 1;
+        }
+
+        if to_delete > 0 {
             self.buffer.drain(0..to_delete);
         }
     }

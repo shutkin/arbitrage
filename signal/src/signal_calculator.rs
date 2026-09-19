@@ -10,6 +10,42 @@ pub struct SignalCalculator {
     derivative2_weight: f64,
     imbalance1_weights: [f64; IMBALANCE_LEVELS.len()],
     imbalance2_weights: [f64; IMBALANCE_LEVELS.len()],
+    performance: SignalPerformance,
+}
+
+pub const TRAINING_WINDOWS: [u8; 4] = [5, 10, 15, 30];
+
+#[derive(Copy, Clone, Debug, Default)]
+pub struct SignalPerformance {
+    pub training_deals: u32,
+    pub training_total_pnl: f64,
+
+    pub training_windows_pnl: [f64; 4],
+
+    pub leg1_volatility: f64,
+    pub leg2_volatility: f64,
+    pub spread_volatility: f64,
+
+    pub actual_deals: u32,
+    pub actual_total_pnl: f64,
+}
+
+impl SignalPerformance {
+    pub fn get_training_deal_pnl(&self) -> f64 {
+        if self.training_deals > 0 {
+            self.training_total_pnl / self.training_deals as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn get_actual_deal_pnl(&self) -> f64 {
+        if self.actual_deals > 0 {
+            self.actual_total_pnl / self.actual_deals as f64
+        } else {
+            0.0
+        }
+    }
 }
 
 impl SignalCalculator {
@@ -20,7 +56,17 @@ impl SignalCalculator {
             derivative2_weight: param[2],
             imbalance1_weights: [param[3], param[4], param[5], param[6], param[7]],
             imbalance2_weights: [param[8], param[9], param[10], param[11], param[12]],
+            performance: SignalPerformance::default(),
         }
+    }
+
+    pub fn set_performance(&mut self, performance: SignalPerformance) {
+        self.performance = performance;
+    }
+    
+    fn deal_performance(&mut self, deal_profit: f64) {
+        self.performance.actual_total_pnl += deal_profit;
+        self.performance.actual_deals += 1;
     }
 
     fn calculate(&self, v1: &OrderBookValues, v2: &OrderBookValues) -> f64 {
@@ -66,6 +112,28 @@ impl CalculatorsPair {
         }
     }
     
+    pub fn deal_performance(&mut self, trade_signal: TradeSignal, deal_profit: f64) {
+        match trade_signal {
+            TradeSignal::Sell1Buy2(_) => {
+                if let Some(up) = self.up.as_mut() {
+                    up.deal_performance(deal_profit);
+                }
+            }
+            TradeSignal::Buy1Sell2(_) => {
+                if let Some(down) = self.down.as_mut() {
+                    down.deal_performance(deal_profit);
+                }
+            }
+            TradeSignal::None => {}
+        }
+    }
+
+    pub fn get_performances(&self) -> (SignalPerformance, SignalPerformance) {
+        let up = self.up.map(|i| i.performance).unwrap_or_default();
+        let down = self.down.map(|i| i.performance).unwrap_or_default();
+        (up, down)
+    }
+    
     pub fn get_created_on(&self) -> DateTime<Utc> {
         self.created_on
     }
@@ -83,11 +151,4 @@ impl CalculatorsPair {
             TradeSignal::None
         }
     }
-}
-
-pub fn def_calculator(time: DateTime<Utc>) -> CalculatorsPair {
-    CalculatorsPair {
-        created_on: time,
-        up: Some(SignalCalculator { threshold: 6.653802170662007, derivative1_weight: 0.1838496911725353, derivative2_weight: -0.1630741886777645, imbalance1_weights: [-0.1816349844788731, 0.11941825272636117, 0.04399864656050896, 0.22209138454769906, 0.02391486403417551], imbalance2_weights: [-0.10229728876048462, 0.17752644262292283, -0.08827349607286118, -0.05575711617335116, 0.11033908081509058] }),
-        down: Some(SignalCalculator { threshold: 6.418031476549265, derivative1_weight: 0.2392164161790894, derivative2_weight: 0.05530916253476989, imbalance1_weights: [-0.127381108188862, 0.10278265467643305, 0.17807838540013002, 0.19681729665979042, 0.07584425323259014], imbalance2_weights: [0.02027717587950075, -0.03154636125652479, -0.10007531634593625, -0.06466022429683423, -0.13893706926813398] }) }
 }

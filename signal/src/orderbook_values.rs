@@ -4,7 +4,7 @@ use model::OrderBook;
 
 pub const IMBALANCE_LEVELS: [usize; 5] = [3, 5, 10, 20, 50];
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum Leg {
     First, Second,
 }
