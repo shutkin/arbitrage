@@ -87,7 +87,7 @@ async fn main() -> EmptyResult {
 
     let mut instruments = t_invest.list_futures().await?;
     db.insert_instruments(&mut instruments).await?;
-    let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
+    let tickers = ["GLZ6", "GLH7", "GLM7", "GLU7", "BMV6", "BMX6", "BMZ6", "SiZ6", "SiH7"];
     let mut instruments_map = HashMap::new();
     instruments.iter().for_each(|instrument| {
         if tickers.contains(&instrument.ticker.as_str()) && let Some(id) = instrument.id {

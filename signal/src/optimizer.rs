@@ -59,6 +59,13 @@ pub fn calibrate_signal_calculator(
     }
 
     let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
+
+    /*let solver = ParticleSwarm::new(
+        (Array1::from_vec(vec![0.0, 0.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]),
+        Array1::from_vec(vec![10.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])),
+        72
+    );*/
+
     let problem = TradeSimProblem { values, is_up, hold_time_ms, tau_time: decay_time };
 
     debug!("Start optimization {} on events {} - {}",
@@ -67,9 +74,10 @@ pub fn calibrate_signal_calculator(
         .configure(|state| state.max_iters(4096))
         .run()?;
     let optimized_profit = -result.state().get_best_cost();
-    debug!("{} opt profit {optimized_profit}", if is_up {"UP"} else {"DOWN"});
-
     let param = result.state().get_best_param().ok_or("Failed to get best param")?;
+
+    debug!("{} opt profit {optimized_profit} with {param:?}", if is_up {"UP"} else {"DOWN"});
+
     let mut calc = SignalCalculator::from_optimizer_param(param);
     let pair = if is_up {
         CalculatorsPair::new_up(calc, values[values.len() - 1].time)
@@ -96,12 +104,12 @@ pub fn calibrate_signal_calculator(
         spread_volatility,
     });
 
-    Ok(Some(calc))
-    /*if profit > 6_000.0 {
+    //Ok(Some(calc))
+    if profit > 1.0 {
         Ok(Some(calc))
     } else {
         Ok(None)
-    }*/
+    }
 }
 
 fn calculate_volatility(values: &[OrderBookValues], leg: Leg) -> f64 {

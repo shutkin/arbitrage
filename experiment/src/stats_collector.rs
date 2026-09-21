@@ -1,6 +1,6 @@
 use std::io::Write;
 use crate::deal::{Deal, DealDirection};
-use crate::math_utils::{median, p05_p95, positive_percentile};
+use crate::math_utils::{mean, median, p05_p95, positive_percentile};
 use crate::signal_optimization::{calibrate_params, collect_signal_to_pnl_values, CostFunctionImpl, Signal, SignalParams, SignalPnL};
 //use crate::signals::{signal_huber_09_07, signal_spearman_09_07, signal_trading_09_07, signal_unknown_09_03};
 use crate::simulation::{DealHandler, find_order_books_on_horizon, run_stats};
@@ -82,6 +82,141 @@ pub fn signal_contributions(events: &[MarketEvent], params: &SignalParams) -> St
     }
 
     let mut runner = Runner::new(events, params);
+    collect_to_table(&mut runner)
+}
+
+pub fn future_spreads_correlations(events: &[MarketEvent]) -> String {
+    struct Runner<'a> {
+        events: &'a [MarketEvent],
+    }
+
+    const HORIZONS: [i64; 5] = [500, 1000, 1500, 3000, 6000];
+
+    impl<'a> StatisticsProvider for Runner<'a> {
+        fn variants(&self) -> Vec<String> {
+            HORIZONS.iter().map(|v| v.to_string()).collect()
+        }
+
+        fn run(&mut self, variant: u8) -> Vec<(String, String)> {
+            let mut c = Vec::new();
+            let mut d1 = Vec::new();
+            let mut d2 = Vec::new();
+            let mut i1_l3 = Vec::new();
+            let mut i1_l5 = Vec::new();
+            let mut i1_l10 = Vec::new();
+            let mut i1_l20 = Vec::new();
+            let mut i1_l50 = Vec::new();
+            let mut i2_l3 = Vec::new();
+            let mut i2_l5 = Vec::new();
+            let mut i2_l10 = Vec::new();
+            let mut i2_l20 = Vec::new();
+            let mut i2_l50 = Vec::new();
+
+            let (mut v1, mut v2) = (None, None);
+            for (i, event) in self.events.iter().enumerate() {
+                match event {
+                    MarketEvent::OrderBook1(v) => v1 = Some(v),
+                    MarketEvent::OrderBook2(v) => v2 = Some(v),
+                    _ => {}
+                }
+                if let Some(v1) = v1 && let Some(v2) = v2 &&
+                    let Some((hv1, hv2)) =
+                        find_order_books_on_horizon(self.events, i, event.event_datetime() + TimeDelta::milliseconds(HORIZONS[variant as usize])) {
+                    let spread = v2.mid - v1.mid;
+                    let hspread = hv2.mid - hv1.mid;
+                    let change = if v1.std_derivative > 0.0 {
+                        hspread - spread
+                    } else {
+                        spread - hspread
+                    };
+
+                    c.push(change);
+                    d1.push(v1.std_derivative.abs());
+                    d2.push(v2.std_derivative);
+                    i1_l3.push(v1.imbalances[0]);
+                    i1_l5.push(v1.imbalances[1]);
+                    i1_l10.push(v1.imbalances[2]);
+                    i1_l20.push(v1.imbalances[3]);
+                    i1_l50.push(v1.imbalances[4]);
+                    i2_l3.push(v2.imbalances[0]);
+                    i2_l5.push(v2.imbalances[1]);
+                    i2_l10.push(v2.imbalances[2]);
+                    i2_l20.push(v2.imbalances[3]);
+                    i2_l50.push(v2.imbalances[4]);
+                }
+            }
+
+            vec![
+                ("d1".to_string(), format!("{:.4}", correlation::spearmanr(&d1, &c))),
+                ("d2".to_string(), format!("{:.4}", correlation::spearmanr(&d2, &c))),
+                ("i1_l3".to_string(), format!("{:.4}", correlation::spearmanr(&i1_l3, &c))),
+                ("i1_l5".to_string(), format!("{:.4}", correlation::spearmanr(&i1_l5, &c))),
+                ("i1_l10".to_string(), format!("{:.4}", correlation::spearmanr(&i1_l10, &c))),
+                ("i1_l20".to_string(), format!("{:.4}", correlation::spearmanr(&i1_l20, &c))),
+                ("i1_l50".to_string(), format!("{:.4}", correlation::spearmanr(&i1_l50, &c))),
+                ("i2_l3".to_string(), format!("{:.4}", correlation::spearmanr(&i2_l3, &c))),
+                ("i2_l5".to_string(), format!("{:.4}", correlation::spearmanr(&i2_l5, &c))),
+                ("i2_l10".to_string(), format!("{:.4}", correlation::spearmanr(&i2_l10, &c))),
+                ("i2_l20".to_string(), format!("{:.4}", correlation::spearmanr(&i2_l20, &c))),
+                ("i2_l50".to_string(), format!("{:.4}", correlation::spearmanr(&i2_l50, &c))),
+            ]
+        }
+    }
+
+    let mut runner = Runner { events };
+    collect_to_table(&mut runner)
+}
+
+pub fn future_spreads_stats(events: &[MarketEvent], delta: i64) -> String {
+    struct Runner<'a> {
+        events: &'a [MarketEvent],
+        delta: i64,
+    }
+
+    impl<'a> StatisticsProvider for Runner<'a> {
+        fn variants(&self) -> Vec<String> {
+            vec!["mean".to_string(), "median".to_string(), "p95".to_string()]
+        }
+
+        fn run(&mut self, variant: u8) -> Vec<(String, String)> {
+            let mut daily = HashMap::new();
+            let (mut v1, mut v2) = (None, None);
+            for (i, event) in self.events.iter().enumerate() {
+                match event {
+                    MarketEvent::OrderBook1(v) => v1 = Some(v),
+                    MarketEvent::OrderBook2(v) => v2 = Some(v),
+                    _ => {}
+                }
+                if let Some(v1) = v1 && let Some(v2) = v2 &&
+                    let Some((hv1, hv2)) = find_order_books_on_horizon(self.events, i, event.event_datetime() + TimeDelta::milliseconds(self.delta)) {
+                    let spread = v2.mid - v1.mid;
+                    let hspread = hv2.mid - hv1.mid;
+                    let change = if v1.std_derivative > 0.0 {
+                        hspread - spread
+                    } else {
+                        spread - hspread
+                    };
+                    daily.entry(event.event_datetime().date_naive()).or_insert(Vec::new()).push(change);
+                }
+            }
+            let mut days = daily.keys().copied().collect::<Vec<_>>();
+            days.sort();
+
+            let mut result = Vec::with_capacity(days.len());
+            for day in days {
+                let changes = daily.remove(&day).unwrap_or_default();
+                let value = match variant {
+                    0 => mean(&changes),
+                    1 => median(&changes),
+                    _ => p05_p95(&changes).1
+                };
+                result.push((day.to_string(), format!("{value:.4}")));
+            }
+            result
+        }
+    }
+
+    let mut runner = Runner { events, delta };
     collect_to_table(&mut runner)
 }
 

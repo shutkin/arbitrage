@@ -11,11 +11,11 @@ use log::{debug, error};
 use model::OrderBook;
 use std::thread;
 
-const TRAIN_DATA_MINUTES: u16 = 30;
-const TRAIN_INTERVAL_MINUTES: u16 = 5;
-const DEFAULT_DECAY_TIME: f64 = 5.0;
-const STD_DIAPASON_SECONDS: u16 = 1050;
-const HOLD_TIME_MS: u16 = 1100;
+const TRAIN_DATA_MINUTES: u16 = 90;
+const TRAIN_INTERVAL_MINUTES: u16 = 1;
+const DEFAULT_DECAY_TIME: f64 = 0.25 * 60.0;
+const STD_DIAPASON_SECONDS: u16 = 1200;
+const HOLD_TIME_MS: u16 = 300;
 
 #[derive(Copy, Clone)]
 pub enum TradeSignal {

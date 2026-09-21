@@ -4,7 +4,7 @@ use model::OrderBook;
 
 pub const IMBALANCE_LEVELS: [usize; 5] = [3, 5, 10, 20, 50];
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum Leg {
     First, Second,
 }
@@ -72,6 +72,7 @@ impl WindowValuesCalculator {
             (best_bid + best_ask) * 0.5,
             std_diapason_s,
         );
+        //println!("{:?} {}: {normal_derivative:.4?}", self.leg, order_book.timestamp);
 
         OrderBookValues {
             leg: self.leg,

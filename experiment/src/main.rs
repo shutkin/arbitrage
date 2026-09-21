@@ -12,7 +12,7 @@ use crate::math_utils::{mean, median};
 use crate::signal_optimization::{calibrate_params, calibrate_threshold, CostFunctionImpl, SignalParams, SignalParamsDir, find_threshold};
 use crate::signals::{signal_huber_09_03, signal_huber_09_04, signal_huber_09_07, signal_huber_09_08, signal_huber_09_09, signal_huber_09_10};
 use crate::simulation::{run_simulation, run_simulation_on_trades};
-use crate::stats_collector::{daily_signal_to_pnl, deviation_to_spread_movement, trend_buckets, trend_to_pnl, DailyDataWithSignalParams, trend_ranges};
+use crate::stats_collector::{daily_signal_to_pnl, deviation_to_spread_movement, trend_buckets, trend_to_pnl, DailyDataWithSignalParams, trend_ranges, future_spreads_stats, future_spreads_correlations};
 use chrono::{DateTime, Datelike, TimeDelta, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::{info, warn};
@@ -58,7 +58,7 @@ async fn get_order_books(tickers: &[&str], ids: &[i16], diapason: TimeDiapason, 
 }
 
 #[tokio::main]
-async fn main() -> EmptyResult {
+async fn __main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -159,26 +159,34 @@ async fn main() -> EmptyResult {
 }
 
 #[tokio::main]
-async fn __main() -> EmptyResult {
+async fn main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
     let db = db::Db::new(&db_url).await?;
 
     let tickers = ["GLU6", "GLZ6", "GLH7", "GLM7"];
+    //let mut diapason = TimeDiapason::new(
+    //    DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
+    //    DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
+    //);
+    //let end = DateTime::parse_from_rfc3339("2026-09-18T00:00:00Z")?.to_utc();
+
+    //let tickers = ["GLZ6", "GLH7", "GLM7"];
     let mut diapason = TimeDiapason::new(
-        DateTime::parse_from_rfc3339("2026-09-04T05:00:00Z")?.to_utc(),
-        DateTime::parse_from_rfc3339("2026-09-04T20:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-10T05:00:00Z")?.to_utc(),
+        DateTime::parse_from_rfc3339("2026-09-10T20:00:00Z")?.to_utc(),
     );
+    let end = DateTime::parse_from_rfc3339("2026-09-11T00:00:00Z")?.to_utc();
 
     let all_instruments = db.get_instruments(false).await?;
     if let (Some(inst1_id), Some(inst2_id)) = (
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-        for day in 4..12 {
+        while diapason.to < end {
             if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
-                info!("DAY {day}");
+                info!("DAY {}", diapason.from.date_naive());
                 let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
                 let (mut all_values1, mut all_values2) = (Vec::new(), Vec::new());
                 convert_values(&order_books1, &order_books2, &mut all_values1, &mut all_values2);
@@ -187,12 +195,8 @@ async fn __main() -> EmptyResult {
                 calculate_std_deviations(&mut all_values1, STD_DEVIATION_WINDOW_SECONDS);
                 calculate_std_deviations(&mut all_values2, STD_DEVIATION_WINDOW_SECONDS);
 
-                info!("Calculate trend");
-                calculate_trend(&mut all_values1);
-                calculate_trend(&mut all_values2);
-
                 let events = merge_events(&all_values1, &all_values2, &[], &[]);
-                info!("\n{}\n\n", trend_ranges(&events));
+                info!("{}:\n{}", diapason.from.date_naive(), future_spreads_correlations(&events));
             }
 
             diapason.from += TimeDelta::days(1);

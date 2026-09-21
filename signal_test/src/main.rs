@@ -126,10 +126,8 @@ struct OrderBookEvent {
     order_book: OrderBook,
 }
 
-const SLIPPERING_MS: u16 = 0;
-
 #[tokio::main]
-async fn main() -> EmptyResult {
+async fn _main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -143,32 +141,112 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-        for decay_time in [5.0 * 60.0, 10.0 * 60.0, 15.0 * 60.0, 30.0 * 60.0] {
-            let config = SignalConfig { decay_time, ..Default::default() };
+        let mut diapason = TimeDiapason::new(
+            DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
+        );
+        let end = DateTime::parse_from_rfc3339("2026-09-17T00:00:00Z")?.to_utc();
+
+        while diapason.from < end {
+            if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
+                let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
+                info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
+
+                let events = merge_events(&order_books1, &order_books2);
+                let (mut mid1, mut mid2, mut prev_mid1) = (None, None, None);
+                let mut spreads_diffs_500 = 0.0;
+                let mut spreads_cnt_500 = 0;
+                let mut spreads_diffs_1000 = 0.0;
+                let mut spreads_cnt_1000 = 0;
+                for (i, event) in events.iter().enumerate() {
+                    let mid = (get_best_ask(&event.order_book) + get_best_bid(&event.order_book)).as_f64() * 0.5;
+                    if event.is_first_leg {
+                        mid1 = Some(mid);
+                    } else {
+                        mid2 = Some(mid);
+                    }
+
+                    if let Some(mid1) = mid1 && let Some(mid2) = mid2 && let Some(prev_mid1) = prev_mid1 {
+                        let is_up = mid1 > prev_mid1;
+                        let spread = mid2 - mid1;
+                        if let Some((ob1, ob2)) = on_horizon(&events, i, 500) {
+                            let h_mid1 = (get_best_ask(ob1) + get_best_bid(ob1)).as_f64() * 0.5;
+                            let h_mid2 = (get_best_ask(ob2) + get_best_bid(ob2)).as_f64() * 0.5;
+                            let h_spread = h_mid2 - h_mid1;
+                            spreads_diffs_500 += if is_up {
+                                h_spread - spread
+                            } else {
+                                spread - h_spread
+                            };
+                            spreads_cnt_500 += 1;
+                        }
+                        if let Some((ob1, ob2)) = on_horizon(&events, i, 1000) {
+                            let h_mid1 = (get_best_ask(ob1) + get_best_bid(ob1)).as_f64() * 0.5;
+                            let h_mid2 = (get_best_ask(ob2) + get_best_bid(ob2)).as_f64() * 0.5;
+                            let h_spread = h_mid2 - h_mid1;
+                            spreads_diffs_1000 += if is_up {
+                                h_spread - spread
+                            } else {
+                                spread - h_spread
+                            };
+                            spreads_cnt_1000 += 1;
+                        }
+                    }
+
+                    prev_mid1 = mid1;
+                }
+                if spreads_cnt_500 > 0 {
+                    info!("{} avg future spread change on 500ms: {}", diapason.from.date_naive(), spreads_diffs_500 / spreads_cnt_500 as f64);
+                }
+                if spreads_cnt_1000 > 0 {
+                    info!("{} avg future spread change on 1000ms: {}", diapason.from.date_naive(), spreads_diffs_1000 / spreads_cnt_1000 as f64);
+                }
+            }
+            diapason.from += TimeDelta::days(1);
+            diapason.to += TimeDelta::days(1);
+        }
+    }
+    Ok(())
+}
+
+const SLIPPERING_MS: u16 = 0;
+
+#[tokio::main]
+async fn main() -> EmptyResult {
+    dotenv::dotenv().ok();
+    SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
+    let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
+    let db = Db::new(&db_url).await?;
+
+    //let tickers = ["GLU6", "GLZ6"];
+    let tickers = ["GLZ6", "GLH7"];
+
+    let all_instruments = db.get_instruments(false).await?;
+    if let (Some(inst1_id), Some(inst2_id)) = (
+        find_instrument_id(&all_instruments, tickers[0]),
+        find_instrument_id(&all_instruments, tickers[1]),
+    ) {
+            let config = SignalConfig::default();
             let mut signal = Signal::new_with_config(tickers[0], tickers[1], config);
 
             let mut diapason = TimeDiapason::new(
-                DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
-                DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
+                DateTime::parse_from_rfc3339("2026-09-21T05:00:00Z")?.to_utc(),
+                DateTime::parse_from_rfc3339("2026-09-21T20:00:00Z")?.to_utc(),
             );
-            let end = DateTime::parse_from_rfc3339("2026-09-17T00:00:00Z")?.to_utc();
-            //let mut diapason = TimeDiapason::new(
-            //    DateTime::parse_from_rfc3339("2026-09-17T05:00:00Z")?.to_utc(),
-            //    DateTime::parse_from_rfc3339("2026-09-17T20:00:00Z")?.to_utc(),
-            //);
-            //let end = Utc::now();
+            let end = Utc::now();
+            //let end = DateTime::parse_from_rfc3339("2026-09-19T00:00:00Z")?.to_utc();
 
             let (mut total_income, mut total_outcome, mut total_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
             let mut active_deal = Option::<TestDeal>::None;
 
-            while diapason.to < end {
+            while diapason.from < end {
                 if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
                     info!("DAY {}", diapason.from.date_naive());
                     let (mut daily_income, mut daily_outcome, mut daily_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
                     let mut daily_deals = 0;
 
                     let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
-                    //info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
+                    info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
 
                     let events = merge_events(&order_books1, &order_books2);
 
@@ -186,8 +264,12 @@ async fn main() -> EmptyResult {
                             let leg1_v = (perf_up.leg1_volatility + perf_down.leg1_volatility) * 0.5;
                             let leg2_v = (perf_up.leg2_volatility + perf_down.leg2_volatility) * 0.5;
                             let spread_v = (perf_up.spread_volatility + perf_down.spread_volatility) * 0.5;
-                            let actual_wins_up = perf_up.actual_wins as f64 * 100.0 / perf_up.actual_deals as f64;
-                            let actual_wins_down = perf_down.actual_wins as f64 * 100.0 / perf_down.actual_deals as f64;
+                            let actual_wins_up = if perf_up.actual_deals > 0 {
+                                perf_up.actual_wins as f64 * 100.0 / perf_up.actual_deals as f64
+                            } else { 0.0 };
+                            let actual_wins_down = if perf_down.actual_deals > 0 {
+                                perf_down.actual_wins as f64 * 100.0 / perf_down.actual_deals as f64
+                            } else { 0.0 };
                             if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("signal_performance.csv") {
                                 let _ = writeln!(
                                     file, "{},{},{:.1},{:.1},{:.1}%,{},{:.1},{:.1},{:.1}%,{:.5},{:.5},{:.5},{:.5}",
@@ -257,14 +339,13 @@ async fn main() -> EmptyResult {
                         }
                     }
 
-                    info!("Decay time {decay_time} day {} net {} on {} deals with commission {}", diapason.from.date_naive(), daily_income - daily_outcome - daily_commission, daily_deals, daily_commission);
+                    info!("Day {} net {} on {} deals with commission {}", diapason.from.date_naive(), daily_income - daily_outcome - daily_commission, daily_deals, daily_commission);
                 }
 
                 diapason.from += TimeDelta::days(1);
                 diapason.to += TimeDelta::days(1);
             }
-            info!("Decay time {decay_time} minutes net profit {}", total_income - total_outcome - total_commission);
-        }
+            info!("Net profit {}", total_income - total_outcome - total_commission);
     }
     Ok(())
 }
