@@ -13,39 +13,25 @@ pub struct SignalCalculator {
     performance: SignalPerformance,
 }
 
-pub const TRAINING_WINDOWS: [u8; 4] = [5, 10, 15, 30];
-
 #[derive(Copy, Clone, Debug, Default)]
 pub struct SignalPerformance {
     pub training_deals: u32,
     pub training_total_pnl: f64,
-
-    pub training_windows_pnl: [f64; 4],
 
     pub leg1_volatility: f64,
     pub leg2_volatility: f64,
     pub spread_volatility: f64,
 
     pub actual_deals: u32,
+    pub actual_wins: u32,
     pub actual_total_pnl: f64,
 }
 
-impl SignalPerformance {
-    pub fn get_training_deal_pnl(&self) -> f64 {
-        if self.training_deals > 0 {
-            self.training_total_pnl / self.training_deals as f64
-        } else {
-            0.0
-        }
-    }
-
-    pub fn get_actual_deal_pnl(&self) -> f64 {
-        if self.actual_deals > 0 {
-            self.actual_total_pnl / self.actual_deals as f64
-        } else {
-            0.0
-        }
-    }
+#[derive(Copy, Clone, Debug, Default)]
+pub struct PairPerformance {
+    pub created_on: DateTime<Utc>,
+    pub up: SignalPerformance,
+    pub down: SignalPerformance,
 }
 
 impl SignalCalculator {
@@ -67,6 +53,9 @@ impl SignalCalculator {
     fn deal_performance(&mut self, deal_profit: f64) {
         self.performance.actual_total_pnl += deal_profit;
         self.performance.actual_deals += 1;
+        if deal_profit > 0.0 {
+            self.performance.actual_wins += 1;
+        }
     }
 
     fn calculate(&self, v1: &OrderBookValues, v2: &OrderBookValues) -> f64 {
@@ -128,10 +117,15 @@ impl CalculatorsPair {
         }
     }
 
-    pub fn get_performances(&self) -> (SignalPerformance, SignalPerformance) {
-        let up = self.up.map(|i| i.performance).unwrap_or_default();
-        let down = self.down.map(|i| i.performance).unwrap_or_default();
-        (up, down)
+    pub fn get_performances(&self) -> PairPerformance {
+        let perf_up = self.up.map(|i| i.performance).unwrap_or_default();
+        let perf_down = self.down.map(|i| i.performance).unwrap_or_default();
+        
+        PairPerformance {
+            up: perf_up,
+            down: perf_down,
+            created_on: self.created_on,
+        }
     }
     
     pub fn get_created_on(&self) -> DateTime<Utc> {

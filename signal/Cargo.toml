@@ -10,5 +10,5 @@ path = "./src/signal.rs"
 model = { path = "../model" }
 log = "0.4"
 chrono = "0.4"
-argmin = { version = "0.11.0", features = ["_ndarrayl"] }
+argmin = { version = "0.11.0", features = ["_ndarrayl", "rayon"] }
 ndarray = "0.16"

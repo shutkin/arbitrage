@@ -5,15 +5,15 @@ mod simulation;
 
 use crate::optimizer::calibrate_signal_calculator;
 use crate::orderbook_values::{Leg, OrderBookValues, WindowValuesCalculator};
-use crate::signal_calculator::CalculatorsPair;
+use crate::signal_calculator::{CalculatorsPair, PairPerformance};
 use chrono::TimeDelta;
 use log::{debug, error};
 use model::OrderBook;
 use std::thread;
 
-const TRAIN_DATA_MINUTES: u16 = 60;
+const TRAIN_DATA_MINUTES: u16 = 30;
 const TRAIN_INTERVAL_MINUTES: u16 = 5;
-
+const DEFAULT_DECAY_TIME: f64 = 5.0;
 const STD_DIAPASON_SECONDS: u16 = 1050;
 const HOLD_TIME_MS: u16 = 1100;
 
@@ -29,7 +29,7 @@ pub struct SignalConfig {
     pub hold_time_ms: u16,
     pub train_data_minutes: u16,
     pub train_interval_minutes: u16,
-    pub min_profit_per_deal: f64,
+    pub decay_time: f64,
 }
 
 impl Default for SignalConfig {
@@ -39,7 +39,7 @@ impl Default for SignalConfig {
             hold_time_ms: HOLD_TIME_MS,
             train_data_minutes: TRAIN_DATA_MINUTES,
             train_interval_minutes: TRAIN_INTERVAL_MINUTES,
-            min_profit_per_deal: 0.0,
+            decay_time: DEFAULT_DECAY_TIME,
         }
     }
 }
@@ -131,14 +131,14 @@ impl Signal {
         }
     }
     
-    pub fn calibrate(&mut self) {
+    pub fn calibrate(&mut self) -> Option<PairPerformance> {
         if self.buffer.len() < 2 {
-            return;
+            return None;
         }
         let delta = self.buffer[self.buffer.len() - 1].time - self.buffer[0].time;
         let buf_minutes = delta.num_minutes() as u16;
         if buf_minutes < self.config.train_data_minutes - 1 {
-            return;
+            return None;
         }
 
         let last_time = self.buffer[self.buffer.len() - 1].time;
@@ -146,49 +146,15 @@ impl Signal {
             .map(|calc| last_time - calc.get_created_on() > TimeDelta::minutes(self.config.train_interval_minutes as i64))
             .unwrap_or(true) {
             self.shrink_buffer();
-
-            if let Some(calc) = &self.calculator {
-                let (perf_up, perf_down) = calc.get_performances();
-                /*let pnl_up = format!("{:.1} [{:.1} {:.1} {:.1} {:.1}]", perf_up.training_total_pnl,
-                                     perf_up.training_windows_pnl[0], perf_up.training_windows_pnl[1],
-                                     perf_up.training_windows_pnl[2], perf_up.training_windows_pnl[3]);
-                let pnl_down = format!("{:.1} [{:.1} {:.1} {:.1} {:.1}]", perf_down.training_total_pnl,
-                                     perf_down.training_windows_pnl[0], perf_down.training_windows_pnl[1],
-                                     perf_down.training_windows_pnl[2], perf_down.training_windows_pnl[3]);
-                let leg1_v = (perf_up.leg1_volatility + perf_down.leg1_volatility) * 0.5;
-                let leg2_v = (perf_up.leg2_volatility + perf_down.leg2_volatility) * 0.5;
-                let spread_v = (perf_up.spread_volatility + perf_down.spread_volatility) * 0.5;
-                if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("signal_performance.csv") {
-                    let _ = writeln!(
-                        file, "{},{},{},{:.1},{},{},{:.1},{:.5},{:.5},{:.5},{:.5}",
-                        calc.get_created_on(),
-                        perf_up.training_deals,
-                        pnl_up,
-                        perf_up.actual_total_pnl,
-                        perf_down.training_deals,
-                        pnl_down,
-                        perf_down.actual_total_pnl,
-                        leg1_v, leg2_v, spread_v,
-                        spread_v / (leg1_v + leg2_v),
-                    );
-                }
-
-                if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("training_buckets_pnl.csv") {
-                    let _ = writeln!(
-                        file, "{:?},{:?},{:?},{:?},{:?}",
-                        perf_up.training_windows_pnl[0], perf_up.training_windows_pnl[1],
-                        perf_up.training_windows_pnl[2], perf_up.training_windows_pnl[3],
-                        perf_up.actual_total_pnl,
-                    );
-                }*/
-            }
-
+            
+            let performances = self.calculator.map(|calc| calc.get_performances());
+            
             let hold_time = self.config.hold_time_ms;
-            let min_profit_per_deal = self.config.min_profit_per_deal;
+            let decay_time = self.config.decay_time;
 
             let buf_clone = self.buffer.clone();
             let thread_up = thread::spawn(move || {
-                match calibrate_signal_calculator(&buf_clone, true, hold_time, min_profit_per_deal) {
+                match calibrate_signal_calculator(&buf_clone, true, hold_time, decay_time) {
                     Ok(calc) => Some(calc),
                     Err(err) => {
                         error!("Failed to optimize UP calculator: {err}");
@@ -199,7 +165,7 @@ impl Signal {
 
             let buf_clone = self.buffer.clone();
             let thread_down = thread::spawn(move || {
-                match calibrate_signal_calculator(&buf_clone, false, hold_time, min_profit_per_deal) {
+                match calibrate_signal_calculator(&buf_clone, false, hold_time, decay_time) {
                     Ok(calc) => Some(calc),
                     Err(err) => {
                         error!("Failed to optimize DOWN calculator: {err}");
@@ -215,6 +181,10 @@ impl Signal {
                 debug!("{calc:?}");
                 self.calculator = Some(calc);
             }
+            
+            performances
+        } else {
+            None
         }
     }
 

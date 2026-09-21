@@ -1,11 +1,13 @@
 use chrono::{DateTime, Datelike, TimeDelta, Timelike, Utc};
 use db::{Db, QueryAsksOrBids};
-use log::{debug, info, LevelFilter};
+use log::{LevelFilter, debug, info};
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::{Instrument, OrderBook, order_book_cache};
 use rust_decimal::Decimal;
 use signal::{Signal, SignalConfig, TradeSignal};
 use simplelog::SimpleLogger;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 #[derive(Copy, Clone)]
 struct TestDeal {
@@ -131,7 +133,7 @@ async fn main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
-    let db = db::Db::new(&db_url).await?;
+    let db = Db::new(&db_url).await?;
 
     let tickers = ["GLU6", "GLZ6"];
     //let tickers = ["GLZ6", "GLH7"];
@@ -141,8 +143,8 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-        for train_length in [5, 10, 15, 30, 60] {
-            let config = SignalConfig { train_data_minutes: train_length, ..Default::default() };
+        for decay_time in [5.0 * 60.0, 10.0 * 60.0, 15.0 * 60.0, 30.0 * 60.0] {
+            let config = SignalConfig { decay_time, ..Default::default() };
             let mut signal = Signal::new_with_config(tickers[0], tickers[1], config);
 
             let mut diapason = TimeDiapason::new(
@@ -161,7 +163,7 @@ async fn main() -> EmptyResult {
 
             while diapason.to < end {
                 if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
-                    //info!("DAY {}", diapason.from.date_naive());
+                    info!("DAY {}", diapason.from.date_naive());
                     let (mut daily_income, mut daily_outcome, mut daily_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
                     let mut daily_deals = 0;
 
@@ -175,10 +177,35 @@ async fn main() -> EmptyResult {
                     for (i, event) in events.iter().enumerate() {
                         if event.order_book.timestamp.hour() != prev_hour {
                             prev_hour = event.order_book.timestamp.hour();
-                            //info!("Hour {prev_hour}");
+                            info!("Hour {prev_hour}");
                         }
 
-                        signal.calibrate();
+                        if let Some(pair_perf) = signal.calibrate() {
+                            let perf_up = pair_perf.up;
+                            let perf_down = pair_perf.down;
+                            let leg1_v = (perf_up.leg1_volatility + perf_down.leg1_volatility) * 0.5;
+                            let leg2_v = (perf_up.leg2_volatility + perf_down.leg2_volatility) * 0.5;
+                            let spread_v = (perf_up.spread_volatility + perf_down.spread_volatility) * 0.5;
+                            let actual_wins_up = perf_up.actual_wins as f64 * 100.0 / perf_up.actual_deals as f64;
+                            let actual_wins_down = perf_down.actual_wins as f64 * 100.0 / perf_down.actual_deals as f64;
+                            if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("signal_performance.csv") {
+                                let _ = writeln!(
+                                    file, "{},{},{:.1},{:.1},{:.1}%,{},{:.1},{:.1},{:.1}%,{:.5},{:.5},{:.5},{:.5}",
+                                    pair_perf.created_on,
+                                    perf_up.training_deals,
+                                    perf_up.training_total_pnl,
+                                    perf_up.actual_total_pnl,
+                                    actual_wins_up,
+                                    perf_down.training_deals,
+                                    perf_down.training_total_pnl,
+                                    perf_down.actual_total_pnl,
+                                    actual_wins_down,
+                                    leg1_v, leg2_v, spread_v,
+                                    spread_v / (leg1_v + leg2_v),
+                                );
+                            }
+                        }
+
                         let trade_signal = signal.process(
                             if event.is_first_leg { tickers[0] } else { tickers[1] },
                             &event.order_book,
@@ -230,13 +257,13 @@ async fn main() -> EmptyResult {
                         }
                     }
 
-                    info!("Train window {train_length} day {} net {} on {} deals with commission {}", diapason.from.date_naive(), daily_income - daily_outcome - daily_commission, daily_deals, daily_commission);
+                    info!("Decay time {decay_time} day {} net {} on {} deals with commission {}", diapason.from.date_naive(), daily_income - daily_outcome - daily_commission, daily_deals, daily_commission);
                 }
 
                 diapason.from += TimeDelta::days(1);
                 diapason.to += TimeDelta::days(1);
             }
-            info!("Train window {train_length} minutes net profit {}", total_income - total_outcome - total_commission);
+            info!("Decay time {decay_time} minutes net profit {}", total_income - total_outcome - total_commission);
         }
     }
     Ok(())
@@ -280,7 +307,7 @@ fn get_best_bid(order_book: &OrderBook) -> Decimal {
 
 fn merge_events(values1: &[OrderBook], values2: &[OrderBook]) -> Vec<OrderBookEvent> {
     let mut events = Vec::with_capacity(values1.len() + values2.len());
-    let (mut v_index1, mut v_index2, mut t_index1, mut t_index2) = (0, 0, 0, 0);
+    let (mut v_index1, mut v_index2) = (0, 0);
     while v_index1 < values1.len() || v_index2 < values2.len() {
         let mut cur_event = None;
         let mut cur_event_time = None;

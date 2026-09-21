@@ -1,18 +1,18 @@
 use crate::orderbook_values::{Leg, OrderBookValues};
-use crate::signal_calculator::{CalculatorsPair, SignalCalculator, SignalPerformance, TRAINING_WINDOWS};
+use crate::signal_calculator::{CalculatorsPair, SignalCalculator, SignalPerformance};
 use crate::simulation::run_simulation;
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
-use chrono::TimeDelta;
-use log::{debug, info, warn};
+use log::{debug, warn};
 use model::common::CommonError;
-use ndarray::Array1;
 use model::math_util::standard_deviation;
+use ndarray::Array1;
 
 struct TradeSimProblem<'a> {
     values: &'a [OrderBookValues],
     is_up: bool,
     hold_time_ms: u16,
+    tau_time: f64,
 }
 
 impl CostFunction for TradeSimProblem<'_> {
@@ -28,7 +28,7 @@ impl CostFunction for TradeSimProblem<'_> {
             CalculatorsPair::new_down(calculator, last_time)
         };
 
-        let (_, profit) = run_simulation(self.values, &pair, self.hold_time_ms);
+        let (_, profit) = run_simulation(self.values, &pair, self.hold_time_ms, self.tau_time);
         Ok(-profit)
     }
 }
@@ -37,7 +37,7 @@ pub fn calibrate_signal_calculator(
     values: &[OrderBookValues],
     is_up: bool,
     hold_time_ms: u16,
-    min_profit_per_deal: f64,
+    decay_time: f64,
 ) -> Result<Option<SignalCalculator>, CommonError> {
     let initial = Array1::from_vec(
         //      A    D1   D2   I3   I5   I10  I20  I50  I3   I5   I10  I20  I50
@@ -59,9 +59,8 @@ pub fn calibrate_signal_calculator(
     }
 
     let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
-    let problem = TradeSimProblem { values, is_up, hold_time_ms };
+    let problem = TradeSimProblem { values, is_up, hold_time_ms, tau_time: decay_time };
 
-    let last_time = values[values.len() - 1].time;
     debug!("Start optimization {} on events {} - {}",
         if is_up {"UP"} else {"DOWN"}, values[0].time, values[values.len() - 1].time);
     let result = Executor::new(problem, solver)
@@ -78,35 +77,10 @@ pub fn calibrate_signal_calculator(
         CalculatorsPair::new_down(calc, values[values.len() - 1].time)
     };
 
-    let (deals, profit) = run_simulation(values, &pair, hold_time_ms);
+    let (deals, profit) = run_simulation(values, &pair, hold_time_ms, decay_time);
     if profit != optimized_profit {
         warn!("{} opt profit {optimized_profit} but verified is {profit}", if is_up {"UP"} else {"DOWN"});
     }
-
-    let mut training_windows_pnl = [0.0; 4];
-    /*for (window_index, window_from) in TRAINING_WINDOWS.iter().enumerate() {
-        let window_to = if window_index > 0 { TRAINING_WINDOWS[window_index - 1] } else { 0 };
-        let from_time = last_time - TimeDelta::minutes(*window_from as i64);
-        let to_time = last_time - TimeDelta::minutes(window_to as i64);
-        let (mut index_from, mut index_to) = (None, None);
-        let mut i = 0;
-        while i < values.len() {
-            if index_from.is_none() && values[i].time >= from_time {
-                index_from = Some(i);
-            }
-            if index_to.is_none() && values[i].time >= to_time {
-                index_to = Some(i);
-            }
-            if index_from.is_some() && index_to.is_some() {
-                break;
-            }
-            i += 1;
-        }
-        let index_from = index_from.unwrap_or(0);
-        let index_to = index_to.unwrap_or(values.len());
-        let (_, win_profit) = run_simulation(&values[index_from..index_to], &pair, hold_time_ms);
-        training_windows_pnl[window_index] = win_profit;
-    }*/
 
     let leg1_volatility = calculate_volatility(values, Leg::First);
     let leg2_volatility = calculate_volatility(values, Leg::Second);
@@ -116,10 +90,10 @@ pub fn calibrate_signal_calculator(
         training_deals: deals,
         actual_total_pnl: 0.0,
         actual_deals: 0,
+        actual_wins: 0,
         leg1_volatility,
         leg2_volatility,
         spread_volatility,
-        training_windows_pnl,
     });
 
     Ok(Some(calc))

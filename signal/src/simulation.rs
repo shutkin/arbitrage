@@ -6,6 +6,7 @@ use crate::TradeSignal;
 #[derive(Copy, Clone)]
 struct SimDeal {
     signal: TradeSignal,
+    open_time: DateTime<Utc>,
     close_time: DateTime<Utc>,
     open_price1: f64,
     open_price2: f64,
@@ -13,11 +14,12 @@ struct SimDeal {
     close_price2: Option<f64>,
 }
 
-pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, hold_time_ms: u16) -> (u32, f64) {
+pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, hold_time_ms: u16, decay_time: f64) -> (u32, f64) {
     let (mut v1, mut v2) = (None, None);
     let mut active_deal = Option::<SimDeal>::None;
     let (mut total_revenue, mut total_cost, mut total_commission) = (0.0, 0.0, 0.0);
     let mut deals_count = 0;
+    let end_time = values[values.len() - 1].time;
 
     for value in values {
         match value.leg {
@@ -54,11 +56,12 @@ pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, 
                         TradeSignal::Buy1Sell2(_) => deal.open_price1 + close_price2,
                         TradeSignal::None => unreachable!(),
                     };
+                    let weight = (-(end_time - deal.open_time).as_seconds_f64() / decay_time).exp();
                     active_deal = None;
 
-                    total_revenue += revenue;
-                    total_cost += cost;
-                    total_commission += 5.0;
+                    total_revenue += weight * revenue;
+                    total_cost += weight * cost;
+                    total_commission += weight * 5.0;
                     deals_count += 1;
                 }
 
@@ -69,6 +72,7 @@ pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, 
                         let cur_time = v1.time.max(v2.time);
                         Some(SimDeal {
                             signal,
+                            open_time: cur_time,
                             close_time: cur_time + TimeDelta::milliseconds(hold as i64),
                             open_price1: v1.bid,
                             open_price2: v2.ask,
@@ -80,6 +84,7 @@ pub fn run_simulation(values: &[OrderBookValues], calculator: &CalculatorsPair, 
                         let cur_time = v1.time.max(v2.time);
                         Some(SimDeal {
                             signal,
+                            open_time: cur_time,
                             close_time: cur_time + TimeDelta::milliseconds(hold as i64),
                             open_price1: v1.ask,
                             open_price2: v2.bid,
