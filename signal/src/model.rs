@@ -2,15 +2,17 @@ mod orderbook_values;
 pub mod signal_calculator;
 mod optimizer;
 mod simulation;
+mod strategy_optimizer;
 
 use crate::optimizer::calibrate_signal_calculator;
 use crate::orderbook_values::{Leg, OrderBookValues, WindowValuesCalculator};
 use crate::signal_calculator::{CalculatorsPair, PairPerformance};
 use chrono::TimeDelta;
 use log::debug;
-use model::OrderBook;
 use std::thread;
+use model::events::OrderBookEvent;
 
+const MAX_WINDOW_LENGTH_S: i64 = 2000;
 const TRAIN_DATA_MINUTES: u16 = 90;
 const TRAIN_INTERVAL_MINUTES: u16 = 1;
 const DEFAULT_DECAY_TIME: f64 = 0.25 * 60.0;
@@ -25,7 +27,8 @@ pub enum TradeSignal {
     Buy1Sell2(u16),
 }
 
-pub struct SignalConfig {
+#[derive(Copy, Clone, Debug)]
+pub struct ModelConfig {
     pub std_diapason_s: u16,
     pub train_data_minutes: u16,
     pub train_interval_minutes: u16,
@@ -33,7 +36,7 @@ pub struct SignalConfig {
     pub fixed_hold_time: Option<u16>,
 }
 
-impl Default for SignalConfig {
+impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             std_diapason_s: STD_DIAPASON_SECONDS,
@@ -46,10 +49,10 @@ impl Default for SignalConfig {
 }
 
 pub struct WalkForwardModel {
-    ticker1: String,
-    ticker2: String,
+    instrument1_id: i16,
+    instrument2_id: i16,
 
-    config: SignalConfig,
+    config: ModelConfig,
 
     values1_calculator: WindowValuesCalculator,
     values2_calculator: WindowValuesCalculator,
@@ -60,11 +63,11 @@ pub struct WalkForwardModel {
 }
 
 impl WalkForwardModel {
-    pub fn new(ticker1: &str, ticker2: &str) -> Self {
+    pub fn new(instrument1_id: i16, instrument2_id: i16) -> Self {
         Self {
-            ticker1: ticker1.to_string(),
-            ticker2: ticker2.to_string(),
-            config: SignalConfig::default(),
+            instrument1_id,
+            instrument2_id,
+            config: ModelConfig::default(),
 
             values1_calculator: WindowValuesCalculator::new(Leg::First),
             values2_calculator: WindowValuesCalculator::new(Leg::Second),
@@ -75,10 +78,10 @@ impl WalkForwardModel {
         }
     }
 
-    pub fn new_with_config(ticker1: &str, ticker2: &str, config: SignalConfig) -> Self {
+    pub fn new_with_config(instrument1_id: i16, instrument2_id: i16, config: ModelConfig) -> Self {
         Self {
-            ticker1: ticker1.to_string(),
-            ticker2: ticker2.to_string(),
+            instrument1_id,
+            instrument2_id,
             config,
 
             values1_calculator: WindowValuesCalculator::new(Leg::First),
@@ -108,11 +111,11 @@ impl WalkForwardModel {
         }
     }
 
-    pub fn process(&mut self, ticker: &str, order_book: &OrderBook) -> TradeSignal {
-        let v = if self.ticker1 == ticker {
-            self.values1_calculator.calculate(order_book, self.config.std_diapason_s)
-        } else if self.ticker2 == ticker {
-            self.values2_calculator.calculate(order_book, self.config.std_diapason_s)
+    pub fn process(&mut self, event: &OrderBookEvent) -> TradeSignal {
+        let v = if self.instrument1_id == event.instrument_id {
+            self.values1_calculator.calculate(&event.order_book, self.config.std_diapason_s)
+        } else if self.instrument2_id == event.instrument_id {
+            self.values2_calculator.calculate(&event.order_book, self.config.std_diapason_s)
         } else {
             return TradeSignal::None;
         };

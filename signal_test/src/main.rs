@@ -1,15 +1,16 @@
-use std::collections::HashMap;
 use chrono::{DateTime, Datelike, TimeDelta, Timelike, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::{LevelFilter, debug, info};
 use model::common::{CommonError, EmptyResult, TimeDiapason};
+use model::events::OrderBookEvent;
 use model::{Instrument, OrderBook, order_book_cache};
 use rust_decimal::Decimal;
+use signal::signal_calculator::PairPerformance;
+use signal::{HOLD_TIME_VARIANTS, ModelConfig, TradeSignal, WalkForwardModel};
 use simplelog::SimpleLogger;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
-use signal::{WalkForwardModel, SignalConfig, TradeSignal, HOLD_TIME_VARIANTS};
-use signal::signal_calculator::PairPerformance;
 
 #[derive(Copy, Clone)]
 struct TestDeal {
@@ -123,11 +124,6 @@ impl TestDeal {
     }
 }
 
-struct OrderBookEvent {
-    is_first_leg: bool,
-    order_book: OrderBook,
-}
-
 const SLIPPERING_MS: u16 = 0;
 
 #[tokio::main]
@@ -145,8 +141,8 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-            let config = SignalConfig::default();
-            let mut model = WalkForwardModel::new_with_config(tickers[0], tickers[1], config);
+            let config = ModelConfig::default();
+            let mut model = WalkForwardModel::new_with_config(inst1_id, inst2_id, config);
 
             let mut diapason = TimeDiapason::new(
                 DateTime::parse_from_rfc3339("2026-09-18T05:00:00Z")?.to_utc(),
@@ -167,7 +163,7 @@ async fn main() -> EmptyResult {
                     let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
                     info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
 
-                    let events = merge_events(&order_books1, &order_books2);
+                    let events = merge_events(inst1_id, inst2_id, &order_books1, &order_books2);
 
                     let mut prev_hour = events[0].order_book.timestamp.hour();
                     let (mut last_ob1, mut last_ob2) = (None, None);
@@ -202,12 +198,9 @@ async fn main() -> EmptyResult {
                             }
                         }
 
-                        let trade_signal = model.process(
-                            if event.is_first_leg { tickers[0] } else { tickers[1] },
-                            &event.order_book,
-                        );
+                        let trade_signal = model.process(event);
 
-                        if event.is_first_leg {
+                        if event.instrument_id == inst1_id {
                             last_ob1 = Some(event.order_book.clone());
                         } else {
                             last_ob2 = Some(event.order_book.clone());
@@ -216,14 +209,14 @@ async fn main() -> EmptyResult {
                         if let Some(ob1) = &last_ob1 && let Some(ob2) = &last_ob2 {
                             if let Some(deal) = active_deal.as_mut() {
                                 if ob1.timestamp > deal.close_time {
-                                    if let Some((hob1, _)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                    if let Some((hob1, _)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
                                         deal.close1(hob1);
                                     } else {
                                         deal.close1(ob1);
                                     }
                                 }
                                 if ob2.timestamp > deal.close_time {
-                                    if let Some((_, hob2)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                    if let Some((_, hob2)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
                                         deal.close2(hob2);
                                     } else {
                                         deal.close2(ob2);
@@ -244,7 +237,7 @@ async fn main() -> EmptyResult {
                                     active_deal = None;
                                 }
                             } else if matches!(trade_signal, TradeSignal::Buy1Sell2(_) | TradeSignal::Sell1Buy2(_)) {
-                                if let Some((hob1, hob2)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                if let Some((hob1, hob2)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
                                     active_deal = TestDeal::open(trade_signal, hob1, hob2);
                                 } else {
                                     active_deal = TestDeal::open(trade_signal, ob1, ob2);
@@ -309,13 +302,13 @@ async fn _main() -> EmptyResult {
         let end = DateTime::parse_from_rfc3339("2026-09-09T00:00:00Z")?.to_utc();
 
         let mut contexts = Vec::with_capacity(HOLD_TIME_VARIANTS.len() + 1);
-        contexts.push(TestContext::new(0, WalkForwardModel::new(tickers[0], tickers[1])));
+        contexts.push(TestContext::new(0, WalkForwardModel::new(inst1_id, inst2_id)));
         for hold_time in HOLD_TIME_VARIANTS {
-            let config = SignalConfig {
+            let config = ModelConfig {
                 fixed_hold_time: Some(hold_time),
-                ..SignalConfig::default()
+                ..ModelConfig::default()
             };
-            let context = TestContext::new(hold_time, WalkForwardModel::new_with_config(tickers[0], tickers[1], config));
+            let context = TestContext::new(hold_time, WalkForwardModel::new_with_config(inst1_id, inst2_id, config));
             contexts.push(context);
         }
 
@@ -328,7 +321,7 @@ async fn _main() -> EmptyResult {
                 let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
                 info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
 
-                let events = merge_events(&order_books1, &order_books2);
+                let events = merge_events(inst1_id, inst2_id, &order_books1, &order_books2);
 
                 let mut prev_hour = events[0].order_book.timestamp.hour();
                 let (mut last_ob1, mut last_ob2) = (None, None);
@@ -346,12 +339,9 @@ async fn _main() -> EmptyResult {
                                     .push((context.fixed_hold_time, pair_perf));
                         }
 
-                        let trade_signal = context.model.process(
-                            if event.is_first_leg { tickers[0] } else { tickers[1] },
-                            &event.order_book,
-                        );
+                        let trade_signal = context.model.process(event);
 
-                        if event.is_first_leg {
+                        if event.instrument_id == inst1_id {
                             last_ob1 = Some(event.order_book.clone());
                         } else {
                             last_ob2 = Some(event.order_book.clone());
@@ -360,14 +350,14 @@ async fn _main() -> EmptyResult {
                         if let Some(ob1) = &last_ob1 && let Some(ob2) = &last_ob2 {
                             if let Some(deal) = context.active_deal.as_mut() {
                                 if ob1.timestamp > deal.close_time {
-                                    if let Some((hob1, _)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                    if let Some((hob1, _)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
                                         deal.close1(hob1);
                                     } else {
                                         deal.close1(ob1);
                                     }
                                 }
                                 if ob2.timestamp > deal.close_time {
-                                    if let Some((_, hob2)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                    if let Some((_, hob2)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
                                         deal.close2(hob2);
                                     } else {
                                         deal.close2(ob2);
@@ -384,7 +374,7 @@ async fn _main() -> EmptyResult {
                                     context.active_deal = None;
                                 }
                             } else if matches!(trade_signal, TradeSignal::Buy1Sell2(_) | TradeSignal::Sell1Buy2(_)) {
-                                if let Some((hob1, hob2)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                if let Some((hob1, hob2)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
                                     context.active_deal = TestDeal::open(trade_signal, hob1, hob2);
                                 } else {
                                     context.active_deal = TestDeal::open(trade_signal, ob1, ob2);
@@ -451,7 +441,7 @@ async fn _main() -> EmptyResult {
     Ok(())
 }
 
-fn on_horizon(events: &[OrderBookEvent], i: usize, horizon: u16) -> Option<(&OrderBook, &OrderBook)> {
+fn on_horizon(events: &[OrderBookEvent], i: usize, first_leg_id: i16, horizon: u16) -> Option<(&OrderBook, &OrderBook)> {
     if horizon == 0 {
         return None;
     }
@@ -462,7 +452,7 @@ fn on_horizon(events: &[OrderBookEvent], i: usize, horizon: u16) -> Option<(&Ord
     let (mut i1, mut i2) = (None, None);
     while index < events.len() {
         if events[index].order_book.timestamp >= target_time {
-            if events[index].is_first_leg {
+            if events[index].instrument_id == first_leg_id {
                 i1 = Some(index);
             } else {
                 i2 = Some(index);
@@ -487,7 +477,7 @@ fn get_best_bid(order_book: &OrderBook) -> Decimal {
     order_book.bids.iter().map(|data| data.price).max().unwrap()
 }
 
-fn merge_events(values1: &[OrderBook], values2: &[OrderBook]) -> Vec<OrderBookEvent> {
+fn merge_events(id1: i16, id2: i16, values1: &[OrderBook], values2: &[OrderBook]) -> Vec<OrderBookEvent> {
     let mut events = Vec::with_capacity(values1.len() + values2.len());
     let (mut v_index1, mut v_index2) = (0, 0);
     while v_index1 < values1.len() || v_index2 < values2.len() {
@@ -500,7 +490,7 @@ fn merge_events(values1: &[OrderBook], values2: &[OrderBook]) -> Vec<OrderBookEv
             } else { true };
             if use_it {
                 cur_event_time = Some(v.timestamp);
-                cur_event = Some(OrderBookEvent { is_first_leg: true, order_book: v.clone() });
+                cur_event = Some(OrderBookEvent { instrument_id: id1, order_book: v.clone() });
             }
         }
 
@@ -510,12 +500,12 @@ fn merge_events(values1: &[OrderBook], values2: &[OrderBook]) -> Vec<OrderBookEv
             } else { true };
             if use_it {
                 cur_event_time = Some(v.timestamp);
-                cur_event = Some(OrderBookEvent { is_first_leg: false, order_book: v.clone() });
+                cur_event = Some(OrderBookEvent { instrument_id: id2, order_book: v.clone() });
             }
         }
 
         if let Some(event) = cur_event {
-            if event.is_first_leg {
+            if event.instrument_id == id1 {
                 v_index1 += 1;
             } else {
                 v_index2 += 1;

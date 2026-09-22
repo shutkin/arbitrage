@@ -1,6 +1,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use model::math_util::standard_deviation;
 use model::OrderBook;
+use crate::MAX_WINDOW_LENGTH_S;
 
 pub const IMBALANCE_LEVELS: [usize; 5] = [3, 5, 10, 20, 50];
 
@@ -72,7 +73,6 @@ impl WindowValuesCalculator {
             (best_bid + best_ask) * 0.5,
             std_diapason_s,
         );
-        //println!("{:?} {}: {normal_derivative:.4?}", self.leg, order_book.timestamp);
 
         OrderBookValues {
             leg: self.leg,
@@ -85,11 +85,17 @@ impl WindowValuesCalculator {
     }
 
     fn calculate_derivative(&mut self, time: DateTime<Utc>, mid: f64, diapason_s: u16) -> f64 {
-        let window_start = time - TimeDelta::seconds(diapason_s as i64);
+        let window_start = time - TimeDelta::seconds(MAX_WINDOW_LENGTH_S);
         while !self.window_times.is_empty() && self.window_times[0] < window_start {
             self.window_times.remove(0);
             self.window_derivatives.remove(0);
             self.window_mids.remove(0);
+        }
+
+        let data_start = time - TimeDelta::seconds(diapason_s as i64);
+        let mut start_index = 0;
+        while start_index < self.window_times.len() && self.window_times[start_index] < data_start {
+            start_index += 1;
         }
 
         let mut prev_index = self.window_mids.len() as i32 - 1;
@@ -103,7 +109,7 @@ impl WindowValuesCalculator {
         } else { 0.0 };
 
         let mut result = 0.0;
-        if derivative.abs() > f64::MIN_POSITIVE && let Some(std) = standard_deviation(&self.window_derivatives) {
+        if derivative.abs() > f64::MIN_POSITIVE && let Some(std) = standard_deviation(&self.window_derivatives[start_index..]) {
             if std > 0.0000001 {
                 result = derivative / std
             } else {
