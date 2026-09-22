@@ -3,10 +3,11 @@ use crate::signal_calculator::{CalculatorsPair, SignalCalculator, SignalPerforma
 use crate::simulation::run_simulation;
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use model::common::CommonError;
 use model::math_util::standard_deviation;
 use ndarray::Array1;
+use crate::HOLD_TIMES;
 
 struct TradeSimProblem<'a> {
     values: &'a [OrderBookValues],
@@ -21,19 +22,43 @@ impl CostFunction for TradeSimProblem<'_> {
 
     fn cost(&self, param: &Self::Param) -> Result<Self::Output, Error> {
         let last_time = self.values[self.values.len() - 1].time;
-        let calculator = SignalCalculator::from_optimizer_param(param);
+        let calculator = SignalCalculator::from_optimizer_param(self.hold_time_ms, param);
         let pair = if self.is_up {
             CalculatorsPair::new_up(calculator, last_time)
         } else {
             CalculatorsPair::new_down(calculator, last_time)
         };
 
-        let (_, profit) = run_simulation(self.values, &pair, self.hold_time_ms, self.tau_time);
+        let (_, profit) = run_simulation(self.values, &pair, self.tau_time);
         Ok(-profit)
     }
 }
 
-pub fn calibrate_signal_calculator(
+pub fn calibrate_signal_calculator(values: &[OrderBookValues], is_up: bool, decay_time: f64) -> Option<SignalCalculator> {
+    let mut best_profit = 0.0;
+    let mut best_calculator = None;
+    
+    for hold_time_ms in HOLD_TIMES {
+        let calc = match calibrate_signal_calculator_on_hold_time(values, is_up, hold_time_ms, decay_time) {
+            Ok(calc) => calc,
+            Err(err) => {
+                error!("Failed to optimize {} calculator: {err}", if is_up { "up" } else { "down" });
+                None
+            }
+        };
+        if let Some(calc) = calc {
+            let profit = calc.get_train_profit();
+            if profit > best_profit {
+                best_profit = profit;
+                best_calculator = Some(calc);
+            }
+        }
+    }
+    
+    best_calculator
+}
+
+fn calibrate_signal_calculator_on_hold_time(
     values: &[OrderBookValues],
     is_up: bool,
     hold_time_ms: u16,
@@ -78,14 +103,14 @@ pub fn calibrate_signal_calculator(
 
     debug!("{} opt profit {optimized_profit} with {param:?}", if is_up {"UP"} else {"DOWN"});
 
-    let mut calc = SignalCalculator::from_optimizer_param(param);
+    let mut calc = SignalCalculator::from_optimizer_param(hold_time_ms, param);
     let pair = if is_up {
         CalculatorsPair::new_up(calc, values[values.len() - 1].time)
     } else {
         CalculatorsPair::new_down(calc, values[values.len() - 1].time)
     };
 
-    let (deals, profit) = run_simulation(values, &pair, hold_time_ms, decay_time);
+    let (deals, profit) = run_simulation(values, &pair, decay_time);
     if profit != optimized_profit {
         warn!("{} opt profit {optimized_profit} but verified is {profit}", if is_up {"UP"} else {"DOWN"});
     }

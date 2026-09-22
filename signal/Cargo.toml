@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-path = "./src/signal.rs"
+path = "./src/model.rs"
 
 [dependencies]
 model = { path = "../model" }

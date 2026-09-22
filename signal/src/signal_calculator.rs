@@ -5,6 +5,7 @@ use ndarray::Array1;
 
 #[derive(Copy, Clone, Debug)]
 pub struct SignalCalculator {
+    hold_time_ms: u16,
     threshold: f64,
     derivative1_weight: f64,
     derivative2_weight: f64,
@@ -35,8 +36,9 @@ pub struct PairPerformance {
 }
 
 impl SignalCalculator {
-    pub fn from_optimizer_param(param: &Array1<f64>) -> Self {
+    pub fn from_optimizer_param(hold_time_ms: u16, param: &Array1<f64>) -> Self {
         Self {
+            hold_time_ms,
             threshold: param[0],
             derivative1_weight: param[1].max(0.0),
             derivative2_weight: param[2],
@@ -48,6 +50,14 @@ impl SignalCalculator {
 
     pub fn set_performance(&mut self, performance: SignalPerformance) {
         self.performance = performance;
+    }
+    
+    pub fn get_train_profit(&self) -> f64 {
+        self.performance.training_total_pnl
+    }
+    
+    pub fn get_hold_time_ms(&self) -> u16 {
+        self.hold_time_ms
     }
     
     fn deal_performance(&mut self, deal_profit: f64) {
@@ -132,14 +142,17 @@ impl CalculatorsPair {
         self.created_on
     }
     
-    pub fn calculate(&self, v1: &OrderBookValues, v2: &OrderBookValues, hold_time_ms: u16) -> TradeSignal {
+    pub fn calculate(&self, v1: &OrderBookValues, v2: &OrderBookValues) -> TradeSignal {
         let calculator = if v1.normal_derivative > 0.0 {&self.up} else {&self.down};
-        let score = calculator.map(|calc| calc.calculate(v1, v2)).unwrap_or(0.0);
-        if score > 0.0 {
-            if v1.normal_derivative > 0.0 {
-                TradeSignal::Sell1Buy2(hold_time_ms)
+        if let Some(calculator) = calculator {
+            if calculator.calculate(v1, v2) > 0.0 {
+                if v1.normal_derivative > 0.0 {
+                    TradeSignal::Sell1Buy2(calculator.hold_time_ms)
+                } else {
+                    TradeSignal::Buy1Sell2(calculator.hold_time_ms)
+                }
             } else {
-                TradeSignal::Buy1Sell2(hold_time_ms)
+                TradeSignal::None
             }
         } else {
             TradeSignal::None

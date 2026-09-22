@@ -4,10 +4,10 @@ use log::{LevelFilter, debug, info};
 use model::common::{CommonError, EmptyResult, TimeDiapason};
 use model::{Instrument, OrderBook, order_book_cache};
 use rust_decimal::Decimal;
-use signal::{Signal, SignalConfig, TradeSignal};
 use simplelog::SimpleLogger;
 use std::fs::OpenOptions;
 use std::io::Write;
+use signal::{WalkForwardModel, SignalConfig, TradeSignal};
 
 #[derive(Copy, Clone)]
 struct TestDeal {
@@ -227,7 +227,7 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
             let config = SignalConfig::default();
-            let mut signal = Signal::new_with_config(tickers[0], tickers[1], config);
+            let mut model = WalkForwardModel::new_with_config(tickers[0], tickers[1], config);
 
             let mut diapason = TimeDiapason::new(
                 DateTime::parse_from_rfc3339("2026-09-21T05:00:00Z")?.to_utc(),
@@ -255,10 +255,10 @@ async fn main() -> EmptyResult {
                     for (i, event) in events.iter().enumerate() {
                         if event.order_book.timestamp.hour() != prev_hour {
                             prev_hour = event.order_book.timestamp.hour();
-                            info!("Hour {prev_hour}");
+                            //info!("Hour {prev_hour}");
                         }
 
-                        if let Some(pair_perf) = signal.calibrate() {
+                        if let Some(pair_perf) = model.calibrate() {
                             let perf_up = pair_perf.up;
                             let perf_down = pair_perf.down;
                             let leg1_v = (perf_up.leg1_volatility + perf_down.leg1_volatility) * 0.5;
@@ -288,7 +288,7 @@ async fn main() -> EmptyResult {
                             }
                         }
 
-                        let trade_signal = signal.process(
+                        let trade_signal = model.process(
                             if event.is_first_leg { tickers[0] } else { tickers[1] },
                             &event.order_book,
                         );
@@ -319,7 +319,7 @@ async fn main() -> EmptyResult {
                                 if deal.close_price1.is_some() && deal.close_price2.is_some() {
                                     let (revenue, cost) = deal.close();
                                     let commission = Decimal::from(5);
-                                    signal.inform_deal_result(deal.signal, (revenue - cost - commission).as_f64());
+                                    model.inform_deal_result(deal.signal, (revenue - cost - commission).as_f64());
                                     total_income += revenue;
                                     daily_income += revenue;
                                     total_outcome += cost;

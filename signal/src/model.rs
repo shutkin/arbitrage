@@ -7,7 +7,7 @@ use crate::optimizer::calibrate_signal_calculator;
 use crate::orderbook_values::{Leg, OrderBookValues, WindowValuesCalculator};
 use crate::signal_calculator::{CalculatorsPair, PairPerformance};
 use chrono::TimeDelta;
-use log::{debug, error};
+use log::{debug, info};
 use model::OrderBook;
 use std::thread;
 
@@ -15,7 +15,8 @@ const TRAIN_DATA_MINUTES: u16 = 90;
 const TRAIN_INTERVAL_MINUTES: u16 = 1;
 const DEFAULT_DECAY_TIME: f64 = 0.25 * 60.0;
 const STD_DIAPASON_SECONDS: u16 = 1200;
-const HOLD_TIME_MS: u16 = 300;
+
+const HOLD_TIMES: [u16; 6] = [200, 300, 500, 750, 1000, 1500];
 
 #[derive(Copy, Clone)]
 pub enum TradeSignal {
@@ -26,7 +27,6 @@ pub enum TradeSignal {
 
 pub struct SignalConfig {
     pub std_diapason_s: u16,
-    pub hold_time_ms: u16,
     pub train_data_minutes: u16,
     pub train_interval_minutes: u16,
     pub decay_time: f64,
@@ -36,7 +36,6 @@ impl Default for SignalConfig {
     fn default() -> Self {
         Self {
             std_diapason_s: STD_DIAPASON_SECONDS,
-            hold_time_ms: HOLD_TIME_MS,
             train_data_minutes: TRAIN_DATA_MINUTES,
             train_interval_minutes: TRAIN_INTERVAL_MINUTES,
             decay_time: DEFAULT_DECAY_TIME,
@@ -44,7 +43,7 @@ impl Default for SignalConfig {
     }
 }
 
-pub struct Signal {
+pub struct WalkForwardModel {
     ticker1: String,
     ticker2: String,
 
@@ -58,7 +57,7 @@ pub struct Signal {
     buffer: Vec<OrderBookValues>,
 }
 
-impl Signal {
+impl WalkForwardModel {
     pub fn new(ticker1: &str, ticker2: &str) -> Self {
         Self {
             ticker1: ticker1.to_string(),
@@ -119,7 +118,7 @@ impl Signal {
 
         if let Some(calculator) = &self.calculator
             && let Some((v1, v2)) = self.get_last_values() {
-            calculator.calculate(v1, v2, self.config.hold_time_ms)
+            calculator.calculate(v1, v2)
         } else {
             TradeSignal::None
         }
@@ -149,35 +148,34 @@ impl Signal {
             
             let performances = self.calculator.map(|calc| calc.get_performances());
             
-            let hold_time = self.config.hold_time_ms;
             let decay_time = self.config.decay_time;
 
             let buf_clone = self.buffer.clone();
             let thread_up = thread::spawn(move || {
-                match calibrate_signal_calculator(&buf_clone, true, hold_time, decay_time) {
-                    Ok(calc) => Some(calc),
-                    Err(err) => {
-                        error!("Failed to optimize UP calculator: {err}");
-                        None
-                    }
-                }
+                calibrate_signal_calculator(&buf_clone, true, decay_time)
             });
 
             let buf_clone = self.buffer.clone();
             let thread_down = thread::spawn(move || {
-                match calibrate_signal_calculator(&buf_clone, false, hold_time, decay_time) {
-                    Ok(calc) => Some(calc),
-                    Err(err) => {
-                        error!("Failed to optimize DOWN calculator: {err}");
-                        None
-                    }
-                }
+                calibrate_signal_calculator(&buf_clone, false, decay_time)
             });
 
-            if let Some(up) = thread_up.join().ok().flatten()
-                && let Some(down) = thread_down.join().ok().flatten() {
+            if let Ok(up) = thread_up.join()
+                && let Ok(down) = thread_down.join() {
                 let last_time = self.buffer[self.buffer.len() - 1].time;
                 let calc = CalculatorsPair::new(up, down, last_time);
+
+                let mut hold_logs = Vec::new();
+                if let Some(up) = &up {
+                    hold_logs.push(format!("UP hold time {}", up.get_hold_time_ms()));
+                }
+                if let Some(down) = &down {
+                    hold_logs.push(format!("DOWN hold time {}", down.get_hold_time_ms()));
+                }
+                if !hold_logs.is_empty() {
+                    info!("{last_time}: {}", hold_logs.join(", "));
+                }
+
                 debug!("{calc:?}");
                 self.calculator = Some(calc);
             }
