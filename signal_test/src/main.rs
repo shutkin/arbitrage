@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use chrono::{DateTime, Datelike, TimeDelta, Timelike, Utc};
 use db::{Db, QueryAsksOrBids};
 use log::{LevelFilter, debug, info};
@@ -7,7 +8,8 @@ use rust_decimal::Decimal;
 use simplelog::SimpleLogger;
 use std::fs::OpenOptions;
 use std::io::Write;
-use signal::{WalkForwardModel, SignalConfig, TradeSignal};
+use signal::{WalkForwardModel, SignalConfig, TradeSignal, HOLD_TIME_VARIANTS};
+use signal::signal_calculator::PairPerformance;
 
 #[derive(Copy, Clone)]
 struct TestDeal {
@@ -126,89 +128,6 @@ struct OrderBookEvent {
     order_book: OrderBook,
 }
 
-#[tokio::main]
-async fn _main() -> EmptyResult {
-    dotenv::dotenv().ok();
-    SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
-    let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
-    let db = Db::new(&db_url).await?;
-
-    let tickers = ["GLU6", "GLZ6"];
-    //let tickers = ["GLZ6", "GLH7"];
-
-    let all_instruments = db.get_instruments(false).await?;
-    if let (Some(inst1_id), Some(inst2_id)) = (
-        find_instrument_id(&all_instruments, tickers[0]),
-        find_instrument_id(&all_instruments, tickers[1]),
-    ) {
-        let mut diapason = TimeDiapason::new(
-            DateTime::parse_from_rfc3339("2026-09-03T05:00:00Z")?.to_utc(),
-            DateTime::parse_from_rfc3339("2026-09-03T20:00:00Z")?.to_utc(),
-        );
-        let end = DateTime::parse_from_rfc3339("2026-09-17T00:00:00Z")?.to_utc();
-
-        while diapason.from < end {
-            if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
-                let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
-                info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
-
-                let events = merge_events(&order_books1, &order_books2);
-                let (mut mid1, mut mid2, mut prev_mid1) = (None, None, None);
-                let mut spreads_diffs_500 = 0.0;
-                let mut spreads_cnt_500 = 0;
-                let mut spreads_diffs_1000 = 0.0;
-                let mut spreads_cnt_1000 = 0;
-                for (i, event) in events.iter().enumerate() {
-                    let mid = (get_best_ask(&event.order_book) + get_best_bid(&event.order_book)).as_f64() * 0.5;
-                    if event.is_first_leg {
-                        mid1 = Some(mid);
-                    } else {
-                        mid2 = Some(mid);
-                    }
-
-                    if let Some(mid1) = mid1 && let Some(mid2) = mid2 && let Some(prev_mid1) = prev_mid1 {
-                        let is_up = mid1 > prev_mid1;
-                        let spread = mid2 - mid1;
-                        if let Some((ob1, ob2)) = on_horizon(&events, i, 500) {
-                            let h_mid1 = (get_best_ask(ob1) + get_best_bid(ob1)).as_f64() * 0.5;
-                            let h_mid2 = (get_best_ask(ob2) + get_best_bid(ob2)).as_f64() * 0.5;
-                            let h_spread = h_mid2 - h_mid1;
-                            spreads_diffs_500 += if is_up {
-                                h_spread - spread
-                            } else {
-                                spread - h_spread
-                            };
-                            spreads_cnt_500 += 1;
-                        }
-                        if let Some((ob1, ob2)) = on_horizon(&events, i, 1000) {
-                            let h_mid1 = (get_best_ask(ob1) + get_best_bid(ob1)).as_f64() * 0.5;
-                            let h_mid2 = (get_best_ask(ob2) + get_best_bid(ob2)).as_f64() * 0.5;
-                            let h_spread = h_mid2 - h_mid1;
-                            spreads_diffs_1000 += if is_up {
-                                h_spread - spread
-                            } else {
-                                spread - h_spread
-                            };
-                            spreads_cnt_1000 += 1;
-                        }
-                    }
-
-                    prev_mid1 = mid1;
-                }
-                if spreads_cnt_500 > 0 {
-                    info!("{} avg future spread change on 500ms: {}", diapason.from.date_naive(), spreads_diffs_500 / spreads_cnt_500 as f64);
-                }
-                if spreads_cnt_1000 > 0 {
-                    info!("{} avg future spread change on 1000ms: {}", diapason.from.date_naive(), spreads_diffs_1000 / spreads_cnt_1000 as f64);
-                }
-            }
-            diapason.from += TimeDelta::days(1);
-            diapason.to += TimeDelta::days(1);
-        }
-    }
-    Ok(())
-}
-
 const SLIPPERING_MS: u16 = 0;
 
 #[tokio::main]
@@ -230,11 +149,11 @@ async fn main() -> EmptyResult {
             let mut model = WalkForwardModel::new_with_config(tickers[0], tickers[1], config);
 
             let mut diapason = TimeDiapason::new(
-                DateTime::parse_from_rfc3339("2026-09-21T05:00:00Z")?.to_utc(),
-                DateTime::parse_from_rfc3339("2026-09-21T20:00:00Z")?.to_utc(),
+                DateTime::parse_from_rfc3339("2026-09-18T05:00:00Z")?.to_utc(),
+                DateTime::parse_from_rfc3339("2026-09-18T20:00:00Z")?.to_utc(),
             );
             let end = Utc::now();
-            //let end = DateTime::parse_from_rfc3339("2026-09-19T00:00:00Z")?.to_utc();
+            //let end = DateTime::parse_from_rfc3339("2026-09-22T00:00:00Z")?.to_utc();
 
             let (mut total_income, mut total_outcome, mut total_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
             let mut active_deal = Option::<TestDeal>::None;
@@ -261,9 +180,6 @@ async fn main() -> EmptyResult {
                         if let Some(pair_perf) = model.calibrate() {
                             let perf_up = pair_perf.up;
                             let perf_down = pair_perf.down;
-                            let leg1_v = (perf_up.leg1_volatility + perf_down.leg1_volatility) * 0.5;
-                            let leg2_v = (perf_up.leg2_volatility + perf_down.leg2_volatility) * 0.5;
-                            let spread_v = (perf_up.spread_volatility + perf_down.spread_volatility) * 0.5;
                             let actual_wins_up = if perf_up.actual_deals > 0 {
                                 perf_up.actual_wins as f64 * 100.0 / perf_up.actual_deals as f64
                             } else { 0.0 };
@@ -272,7 +188,7 @@ async fn main() -> EmptyResult {
                             } else { 0.0 };
                             if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("signal_performance.csv") {
                                 let _ = writeln!(
-                                    file, "{},{},{:.1},{:.1},{:.1}%,{},{:.1},{:.1},{:.1}%,{:.5},{:.5},{:.5},{:.5}",
+                                    file, "{},{},{:.1},{:.1},{:.1}%,{},{:.1},{:.1},{:.1}%",
                                     pair_perf.created_on,
                                     perf_up.training_deals,
                                     perf_up.training_total_pnl,
@@ -282,8 +198,6 @@ async fn main() -> EmptyResult {
                                     perf_down.training_total_pnl,
                                     perf_down.actual_total_pnl,
                                     actual_wins_down,
-                                    leg1_v, leg2_v, spread_v,
-                                    spread_v / (leg1_v + leg2_v),
                                 );
                             }
                         }
@@ -346,6 +260,193 @@ async fn main() -> EmptyResult {
                 diapason.to += TimeDelta::days(1);
             }
             info!("Net profit {}", total_income - total_outcome - total_commission);
+    }
+    Ok(())
+}
+
+struct TestContext {
+    fixed_hold_time: u16,
+    model: WalkForwardModel,
+    active_deal: Option<TestDeal>,
+    total_income: Decimal,
+    total_outcome: Decimal,
+    total_commission: Decimal,
+}
+
+impl TestContext {
+    fn new(fixed_hold_time: u16, model: WalkForwardModel) -> Self {
+        Self {
+            fixed_hold_time,
+            model,
+            active_deal: None,
+            total_income: Decimal::ZERO,
+            total_outcome: Decimal::ZERO,
+            total_commission: Decimal::ZERO,
+        }
+    }
+}
+
+#[tokio::main]
+async fn _main() -> EmptyResult {
+    dotenv::dotenv().ok();
+    SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
+    let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
+    let db = Db::new(&db_url).await?;
+
+    let tickers = ["GLU6", "GLZ6"];
+    //let tickers = ["GLZ6", "GLH7"];
+
+    let all_instruments = db.get_instruments(false).await?;
+    if let (Some(inst1_id), Some(inst2_id)) = (
+        find_instrument_id(&all_instruments, tickers[0]),
+        find_instrument_id(&all_instruments, tickers[1]),
+    ) {
+        let mut diapason = TimeDiapason::new(
+            DateTime::parse_from_rfc3339("2026-09-08T05:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-08T20:00:00Z")?.to_utc(),
+        );
+        //let end = Utc::now();
+        let end = DateTime::parse_from_rfc3339("2026-09-09T00:00:00Z")?.to_utc();
+
+        let mut contexts = Vec::with_capacity(HOLD_TIME_VARIANTS.len() + 1);
+        contexts.push(TestContext::new(0, WalkForwardModel::new(tickers[0], tickers[1])));
+        for hold_time in HOLD_TIME_VARIANTS {
+            let config = SignalConfig {
+                fixed_hold_time: Some(hold_time),
+                ..SignalConfig::default()
+            };
+            let context = TestContext::new(hold_time, WalkForwardModel::new_with_config(tickers[0], tickers[1], config));
+            contexts.push(context);
+        }
+
+        let mut performances: HashMap<DateTime<Utc>, Vec<(u16, PairPerformance)>> = HashMap::new();
+
+        while diapason.from < end {
+            if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
+                info!("DAY {}", diapason.from.date_naive());
+
+                let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
+                info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
+
+                let events = merge_events(&order_books1, &order_books2);
+
+                let mut prev_hour = events[0].order_book.timestamp.hour();
+                let (mut last_ob1, mut last_ob2) = (None, None);
+                for (i, event) in events.iter().enumerate() {
+                    if event.order_book.timestamp.hour() != prev_hour {
+                        prev_hour = event.order_book.timestamp.hour();
+                        info!("Hour {prev_hour}");
+                    }
+
+                    for context in &mut contexts {
+                        if let Some(pair_perf) = context.model.calibrate()
+                            && (pair_perf.up.training_deals > 0 || pair_perf.down.training_deals > 0) {
+                                performances.entry(pair_perf.created_on)
+                                    .or_default()
+                                    .push((context.fixed_hold_time, pair_perf));
+                        }
+
+                        let trade_signal = context.model.process(
+                            if event.is_first_leg { tickers[0] } else { tickers[1] },
+                            &event.order_book,
+                        );
+
+                        if event.is_first_leg {
+                            last_ob1 = Some(event.order_book.clone());
+                        } else {
+                            last_ob2 = Some(event.order_book.clone());
+                        }
+
+                        if let Some(ob1) = &last_ob1 && let Some(ob2) = &last_ob2 {
+                            if let Some(deal) = context.active_deal.as_mut() {
+                                if ob1.timestamp > deal.close_time {
+                                    if let Some((hob1, _)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                        deal.close1(hob1);
+                                    } else {
+                                        deal.close1(ob1);
+                                    }
+                                }
+                                if ob2.timestamp > deal.close_time {
+                                    if let Some((_, hob2)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                        deal.close2(hob2);
+                                    } else {
+                                        deal.close2(ob2);
+                                    }
+                                }
+
+                                if deal.close_price1.is_some() && deal.close_price2.is_some() {
+                                    let (revenue, cost) = deal.close();
+                                    let commission = Decimal::from(5);
+                                    context.model.inform_deal_result(deal.signal, (revenue - cost - commission).as_f64());
+                                    context.total_income += revenue;
+                                    context.total_outcome += cost;
+                                    context.total_commission += commission;
+                                    context.active_deal = None;
+                                }
+                            } else if matches!(trade_signal, TradeSignal::Buy1Sell2(_) | TradeSignal::Sell1Buy2(_)) {
+                                if let Some((hob1, hob2)) = on_horizon(&events, i, SLIPPERING_MS) {
+                                    context.active_deal = TestDeal::open(trade_signal, hob1, hob2);
+                                } else {
+                                    context.active_deal = TestDeal::open(trade_signal, ob1, ob2);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            diapason.from += TimeDelta::days(1);
+            diapason.to += TimeDelta::days(1);
+        }
+        info!("Collected {} periods with performances", performances.len());
+
+        let mut dates = performances.keys().copied().collect::<Vec<_>>();
+        dates.sort();
+        let mut csv = Vec::new();
+
+        let mut header = "time,chosen time up,chosen train up,chosen pnl up,chosen time down,chosen train down,chosen pnl down,".to_string();
+        for hold_time in HOLD_TIME_VARIANTS {
+            header.push_str(&format!("{hold_time} train up,{hold_time} pnl up,{hold_time} train down,{hold_time} pnl down,"));
+        }
+        csv.push(header.trim_end_matches(',').to_string());
+
+        for date in &dates {
+            if let Some(perfs) = performances.remove(date) {
+                let mut line = String::new();
+                line.push_str(&format!("\"{date}\","));
+
+                if let Some((_, perf)) = perfs.iter().find(|(t, _)| *t == 0) {
+                    line.push_str(&format!(
+                        "{},{:.2},{:.2},{},{:.2},{:.2},",
+                        perf.up.chosen_hold_time,
+                        perf.up.training_total_pnl,
+                        perf.up.actual_total_pnl,
+                        perf.down.chosen_hold_time,
+                        perf.down.training_total_pnl,
+                        perf.down.actual_total_pnl,
+                    ));
+                } else {
+                    line.push_str("0,0.0,0.0,0,0.0,0.0,")
+                }
+
+                for hold_time in HOLD_TIME_VARIANTS {
+                    if let Some((_, perf)) = perfs.iter().find(|(t, _)| *t == hold_time) {
+                        line.push_str(&format!(
+                            "{:.2},{:.2},{:.2},{:.2},",
+                            perf.up.training_total_pnl,
+                            perf.up.actual_total_pnl,
+                            perf.down.training_total_pnl,
+                            perf.down.actual_total_pnl,
+                        ));
+                    } else {
+                        line.push_str("0.0,0.0,0.0,0.0,")
+                    }
+                }
+
+                csv.push(line.trim_end_matches(',').to_string());
+            }
+        }
+        std::fs::write("hold_times_09_08.csv", csv.join("\n"))?;
     }
     Ok(())
 }

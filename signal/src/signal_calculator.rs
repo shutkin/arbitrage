@@ -16,12 +16,10 @@ pub struct SignalCalculator {
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct SignalPerformance {
+    pub chosen_hold_time: u16,
+
     pub training_deals: u32,
     pub training_total_pnl: f64,
-
-    pub leg1_volatility: f64,
-    pub leg2_volatility: f64,
-    pub spread_volatility: f64,
 
     pub actual_deals: u32,
     pub actual_wins: u32,

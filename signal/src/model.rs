@@ -1,5 +1,5 @@
 mod orderbook_values;
-mod signal_calculator;
+pub mod signal_calculator;
 mod optimizer;
 mod simulation;
 
@@ -7,7 +7,7 @@ use crate::optimizer::calibrate_signal_calculator;
 use crate::orderbook_values::{Leg, OrderBookValues, WindowValuesCalculator};
 use crate::signal_calculator::{CalculatorsPair, PairPerformance};
 use chrono::TimeDelta;
-use log::{debug, info};
+use log::debug;
 use model::OrderBook;
 use std::thread;
 
@@ -16,7 +16,7 @@ const TRAIN_INTERVAL_MINUTES: u16 = 1;
 const DEFAULT_DECAY_TIME: f64 = 0.25 * 60.0;
 const STD_DIAPASON_SECONDS: u16 = 1200;
 
-const HOLD_TIMES: [u16; 6] = [200, 300, 500, 750, 1000, 1500];
+pub const HOLD_TIME_VARIANTS: [u16; 6] = [200, 300, 500, 750, 1000, 1500];
 
 #[derive(Copy, Clone)]
 pub enum TradeSignal {
@@ -30,6 +30,7 @@ pub struct SignalConfig {
     pub train_data_minutes: u16,
     pub train_interval_minutes: u16,
     pub decay_time: f64,
+    pub fixed_hold_time: Option<u16>,
 }
 
 impl Default for SignalConfig {
@@ -39,6 +40,7 @@ impl Default for SignalConfig {
             train_data_minutes: TRAIN_DATA_MINUTES,
             train_interval_minutes: TRAIN_INTERVAL_MINUTES,
             decay_time: DEFAULT_DECAY_TIME,
+            fixed_hold_time: None,
         }
     }
 }
@@ -149,32 +151,22 @@ impl WalkForwardModel {
             let performances = self.calculator.map(|calc| calc.get_performances());
             
             let decay_time = self.config.decay_time;
+            let fixed_hold_time = self.config.fixed_hold_time;
 
             let buf_clone = self.buffer.clone();
             let thread_up = thread::spawn(move || {
-                calibrate_signal_calculator(&buf_clone, true, decay_time)
+                calibrate_signal_calculator(&buf_clone, true, decay_time, fixed_hold_time)
             });
 
             let buf_clone = self.buffer.clone();
             let thread_down = thread::spawn(move || {
-                calibrate_signal_calculator(&buf_clone, false, decay_time)
+                calibrate_signal_calculator(&buf_clone, false, decay_time, fixed_hold_time)
             });
 
             if let Ok(up) = thread_up.join()
                 && let Ok(down) = thread_down.join() {
                 let last_time = self.buffer[self.buffer.len() - 1].time;
                 let calc = CalculatorsPair::new(up, down, last_time);
-
-                let mut hold_logs = Vec::new();
-                if let Some(up) = &up {
-                    hold_logs.push(format!("UP hold time {}", up.get_hold_time_ms()));
-                }
-                if let Some(down) = &down {
-                    hold_logs.push(format!("DOWN hold time {}", down.get_hold_time_ms()));
-                }
-                if !hold_logs.is_empty() {
-                    info!("{last_time}: {}", hold_logs.join(", "));
-                }
 
                 debug!("{calc:?}");
                 self.calculator = Some(calc);

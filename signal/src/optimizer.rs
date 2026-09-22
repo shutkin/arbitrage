@@ -1,13 +1,12 @@
-use crate::orderbook_values::{Leg, OrderBookValues};
+use crate::HOLD_TIME_VARIANTS;
+use crate::orderbook_values::OrderBookValues;
 use crate::signal_calculator::{CalculatorsPair, SignalCalculator, SignalPerformance};
 use crate::simulation::run_simulation;
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
 use log::{debug, error, warn};
 use model::common::CommonError;
-use model::math_util::standard_deviation;
 use ndarray::Array1;
-use crate::HOLD_TIMES;
 
 struct TradeSimProblem<'a> {
     values: &'a [OrderBookValues],
@@ -34,11 +33,15 @@ impl CostFunction for TradeSimProblem<'_> {
     }
 }
 
-pub fn calibrate_signal_calculator(values: &[OrderBookValues], is_up: bool, decay_time: f64) -> Option<SignalCalculator> {
+pub fn calibrate_signal_calculator(values: &[OrderBookValues], is_up: bool, decay_time: f64, fixed_hold_time: Option<u16>) -> Option<SignalCalculator> {
     let mut best_profit = 0.0;
     let mut best_calculator = None;
     
-    for hold_time_ms in HOLD_TIMES {
+    for hold_time_ms in HOLD_TIME_VARIANTS {
+        if let Some(fixed_hold) = fixed_hold_time && hold_time_ms != fixed_hold {
+            continue;
+        }
+
         let calc = match calibrate_signal_calculator_on_hold_time(values, is_up, hold_time_ms, decay_time) {
             Ok(calc) => calc,
             Err(err) => {
@@ -115,18 +118,13 @@ fn calibrate_signal_calculator_on_hold_time(
         warn!("{} opt profit {optimized_profit} but verified is {profit}", if is_up {"UP"} else {"DOWN"});
     }
 
-    let leg1_volatility = calculate_volatility(values, Leg::First);
-    let leg2_volatility = calculate_volatility(values, Leg::Second);
-    let spread_volatility = calculate_spread_volatility(values);
     calc.set_performance(SignalPerformance {
+        chosen_hold_time: calc.get_hold_time_ms(),
         training_total_pnl: profit,
         training_deals: deals,
         actual_total_pnl: 0.0,
         actual_deals: 0,
         actual_wins: 0,
-        leg1_volatility,
-        leg2_volatility,
-        spread_volatility,
     });
 
     //Ok(Some(calc))
@@ -135,30 +133,4 @@ fn calibrate_signal_calculator_on_hold_time(
     } else {
         Ok(None)
     }
-}
-
-fn calculate_volatility(values: &[OrderBookValues], leg: Leg) -> f64 {
-    let prices = values.iter()
-        .filter(|v| v.leg == leg)
-        .map(|v| v.mid())
-        .collect::<Vec<f64>>();
-    let deltas = prices.windows(2).map(|pair| pair[1] - pair[0]).collect::<Vec<f64>>();
-    standard_deviation(&deltas).unwrap_or_default()
-}
-
-fn calculate_spread_volatility(values: &[OrderBookValues]) -> f64 {
-    let (mut v1, mut v2) = (None, None);
-    let mut spreads = Vec::with_capacity(values.len());
-    for v in values {
-        match v.leg {
-            Leg::First => v1 = Some(v),
-            Leg::Second => v2 = Some(v),
-        }
-
-        if let Some(v1) = v1 && let Some(v2) = v2 {
-            spreads.push(v2.mid() - v1.mid());
-        }
-    }
-    let deltas = spreads.windows(2).map(|pair| pair[1] - pair[0]).collect::<Vec<f64>>();
-    standard_deviation(&deltas).unwrap_or_default()
 }
