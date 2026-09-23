@@ -1,3 +1,4 @@
+use alor::Alor;
 use chrono::Utc;
 use db::Db;
 use log::{debug, error, info, warn};
@@ -76,6 +77,35 @@ impl ListenerHandler {
 
 #[tokio::main]
 async fn main() -> EmptyResult {
+    dotenv::dotenv().ok();
+    SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
+
+    let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
+    let db = Db::new(&db_url).await?;
+
+    let alor = Alor::default();
+    
+    /*
+    let instruments = alor.get_instruments().await?;
+    
+    let mut csv = Vec::with_capacity(instruments.len() + 1);
+    csv.push("ticker,name,status".to_string());
+    let list = instruments.iter()
+        .map(|ins| format!("{},{},{}", ins.ticker, ins.name, ins.status))
+        .collect::<Vec<_>>();
+    csv.extend(list);
+    std::fs::write("alor_instruments.csv", csv.join("\n"))?;
+     */
+    
+    let instruments = db.get_instruments(false).await?
+        .into_iter().filter(|i| i.ticker == "GLZ6" || i.ticker == "GLH7").collect::<Vec<_>>();
+    alor.listen(&instruments).await?;
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn _main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
 
