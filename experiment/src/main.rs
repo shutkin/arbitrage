@@ -91,8 +91,8 @@ async fn __main() -> EmptyResult {
                 calculate_std_deviations(&mut all_values2, STD_DEVIATION_WINDOW_SECONDS);
                 calculate_std_deviations(&mut all_values1, STD_DEVIATION_WINDOW_SECONDS);
                 info!("Calculate trends");
-                calculate_trend(&mut all_values1);
-                calculate_trend(&mut all_values2);
+                //calculate_trend(&mut all_values1);
+                //calculate_trend(&mut all_values2);
 
                 //let trades1 = db.get_trades(inst1_id, diapason).await?;
                 //let trades2 = db.get_trades(inst1_id, diapason).await?;
@@ -109,7 +109,7 @@ async fn __main() -> EmptyResult {
                     let events_clone1 = train_events.clone();
                     let events_clone2 = train_events.clone();
                     let handle_up = thread::spawn(move || {
-                        let mut params = calibrate_params(&events_clone1, CostFunctionImpl::HuberLoss, DealDirection::Sell1Buy2, DEFAULT_HOLD_MS);
+                        let mut params = calibrate_params(&events_clone1, CostFunctionImpl::TradingSimulation, DealDirection::Sell1Buy2, DEFAULT_HOLD_MS);
                         if let Some(t) = find_threshold(&events_clone1, params.up.unwrap(), DealDirection::Sell1Buy2)
                             && let Some(p) = params.up.as_mut() {
                             p.threshold = t;
@@ -117,7 +117,7 @@ async fn __main() -> EmptyResult {
                         Some(params)
                     });
                     let handle_down = thread::spawn(move || {
-                        let mut params = calibrate_params(&events_clone2, CostFunctionImpl::HuberLoss, DealDirection::Buy1Sell2, DEFAULT_HOLD_MS);
+                        let mut params = calibrate_params(&events_clone2, CostFunctionImpl::TradingSimulation, DealDirection::Buy1Sell2, DEFAULT_HOLD_MS);
                         if let Some(t) = find_threshold(&events_clone2, params.down.unwrap(), DealDirection::Buy1Sell2)
                             && let Some(p) = params.down.as_mut() {
                             p.threshold = t;

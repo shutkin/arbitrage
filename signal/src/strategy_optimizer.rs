@@ -15,10 +15,17 @@ pub struct StrategyOptimizer {
 }
 
 impl StrategyOptimizer {
+    pub fn new(instrument1_id: i16, instrument2_id: i16) -> Self {
+        Self {
+            instrument1_id,
+            instrument2_id,
+        }
+    }
+    
     pub fn optimize(&self, events: &[OrderBookEvent]) -> Result<ModelConfig, CommonError> {
         let initial = Array1::from(
             // train_size, decay, stddiv_window
-            vec![90.0, 15.0, 1200.0]
+            vec![60.0, 15.0, 1200.0]
         );
         let mut simplex = Vec::with_capacity(initial.len() + 1);
 
@@ -28,7 +35,7 @@ impl StrategyOptimizer {
             let mut point = initial.clone();
             point[i] += match i {
                 0 => 10.0, // Train size
-                1 => 1.0,  // Decay
+                1 => 5.0,  // Decay
                 _ => 30.0, // stddiv window
             };
             simplex.push(point);
@@ -37,7 +44,7 @@ impl StrategyOptimizer {
         let solver = NelderMead::<Array1<f64>, f64>::new(simplex.clone());
         let problem = GlobalProblem { events, instrument1_id: self.instrument1_id, instrument2_id: self.instrument2_id };
         let result = Executor::new(problem, solver)
-            .configure(|state| state.max_iters(4096))
+            .configure(|state| state.max_iters(256))
             .run()?;
         let optimized_score = -result.state().get_best_cost();
         let param = result.state().get_best_param().ok_or("Failed to get best param")?;
@@ -107,9 +114,10 @@ impl CostFunction for GlobalProblem<'_> {
             daily_pnl.push(daily_revenue - daily_cost);
         }
         
-        let max_pnl = daily_pnl.iter().copied().reduce(f64::max).unwrap_or_default();
+        //let max_pnl = daily_pnl.iter().copied().reduce(f64::max).unwrap_or_default();
+        let mean_pnl = daily_pnl.iter().sum::<f64>() / daily_pnl.len() as f64;
         let pnl_deviation = standard_deviation(&daily_pnl).unwrap_or_default();
-        let score = max_pnl - pnl_deviation;
+        let score = mean_pnl - pnl_deviation;
         info!("Score: {score}");
         
         Ok(-score)

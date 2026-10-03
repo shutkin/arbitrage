@@ -13,3 +13,4 @@ tokio = { version = "1.48", features = ["full"] }
 chrono = "0.4"
 log = "0.4"
 rust_decimal = "1.43"
+rand = "0.10"

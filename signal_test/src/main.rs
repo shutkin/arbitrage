@@ -11,6 +11,8 @@ use simplelog::SimpleLogger;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
+use rust_decimal::prelude::FromPrimitive;
+use signal::strategy_optimizer::StrategyOptimizer;
 
 #[derive(Copy, Clone)]
 struct TestDeal {
@@ -133,6 +135,50 @@ async fn main() -> EmptyResult {
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
     let db = Db::new(&db_url).await?;
 
+    let tickers = ["SiZ6", "SiH7"];// ["GLZ6", "GLH7"];
+
+    let all_instruments = db.get_instruments(false).await?;
+    if let (Some(inst1_id), Some(inst2_id)) = (
+        find_instrument_id(&all_instruments, tickers[0]),
+        find_instrument_id(&all_instruments, tickers[1]),
+    ) {
+        let mut diapason = TimeDiapason::new(
+            DateTime::parse_from_rfc3339("2026-09-28T05:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-28T20:00:00Z")?.to_utc(),
+        );
+        let end = DateTime::parse_from_rfc3339("2026-10-03T00:00:00Z")?.to_utc();
+
+        let mut all_events = Vec::new();
+
+        while diapason.from < end {
+            //if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
+                info!("DAY {}", diapason.from.date_naive());
+                let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
+                info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
+                let events = merge_events(inst1_id, inst2_id, &order_books1, &order_books2);
+                all_events.extend(events);
+            //}
+
+            diapason.from += TimeDelta::days(1);
+            diapason.to += TimeDelta::days(1);
+        }
+
+        let optimizer = StrategyOptimizer::new(inst1_id, inst2_id);
+        info!("Start optimizing");
+        let config = optimizer.optimize(&all_events)?;
+        std::fs::write("optimized_config_03-18.txt", format!("{config:?}"))?;
+        info!("Done");
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn _main() -> EmptyResult {
+    dotenv::dotenv().ok();
+    SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
+    let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
+    let db = Db::new(&db_url).await?;
+
     //let tickers = ["GLU6", "GLZ6"];
     let tickers = ["GLZ6", "GLH7"];
 
@@ -141,118 +187,124 @@ async fn main() -> EmptyResult {
         find_instrument_id(&all_instruments, tickers[0]),
         find_instrument_id(&all_instruments, tickers[1]),
     ) {
-            let config = ModelConfig::default();
-            let mut model = WalkForwardModel::new_with_config(inst1_id, inst2_id, config);
+        let config = ModelConfig { std_diapason_s: 1184, train_data_minutes: 22, train_interval_minutes: 1, decay_time: 40.90421962773701, fixed_hold_time: None };
+        let mut model = WalkForwardModel::new_with_config(inst1_id, inst2_id, config);
 
-            let mut diapason = TimeDiapason::new(
-                DateTime::parse_from_rfc3339("2026-09-18T05:00:00Z")?.to_utc(),
-                DateTime::parse_from_rfc3339("2026-09-18T20:00:00Z")?.to_utc(),
-            );
-            let end = Utc::now();
-            //let end = DateTime::parse_from_rfc3339("2026-09-22T00:00:00Z")?.to_utc();
+        let mut diapason = TimeDiapason::new(
+            DateTime::parse_from_rfc3339("2026-09-21T05:00:00Z")?.to_utc(),
+            DateTime::parse_from_rfc3339("2026-09-21T20:00:00Z")?.to_utc(),
+        );
+        //let end = Utc::now();
+        let end = DateTime::parse_from_rfc3339("2026-09-26T00:00:00Z")?.to_utc();
 
-            let (mut total_income, mut total_outcome, mut total_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
-            let mut active_deal = Option::<TestDeal>::None;
+        let (mut total_income, mut total_outcome, mut total_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+        let mut active_deal = Option::<TestDeal>::None;
 
-            while diapason.from < end {
-                if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
-                    info!("DAY {}", diapason.from.date_naive());
-                    let (mut daily_income, mut daily_outcome, mut daily_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
-                    let mut daily_deals = 0;
+        while diapason.from < end {
+            if !matches!(diapason.from.weekday().number_from_monday(), 6 | 7) {
+                info!("DAY {}", diapason.from.date_naive());
+                let (mut daily_income, mut daily_outcome, mut daily_commission) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+                let mut daily_deals = 0;
 
-                    let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
-                    info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
+                let (order_books1, order_books2) = get_order_books(&tickers, &[inst1_id, inst2_id], diapason, Some(&db)).await?;
 
-                    let events = merge_events(inst1_id, inst2_id, &order_books1, &order_books2);
+                //std::fs::write("GLZ6.json", serde_json::to_string(&order_books1)?)?;
+                //std::fs::write("GLH7.json", serde_json::to_string(&order_books2)?)?;
 
-                    let mut prev_hour = events[0].order_book.timestamp.hour();
-                    let (mut last_ob1, mut last_ob2) = (None, None);
-                    for (i, event) in events.iter().enumerate() {
-                        if event.order_book.timestamp.hour() != prev_hour {
-                            prev_hour = event.order_book.timestamp.hour();
-                            //info!("Hour {prev_hour}");
-                        }
+                let order_books1 = downsample_order_books(order_books1, 900);
+                let order_books2 = downsample_order_books(order_books2, 1600);
+                info!("{} {} order books, {} {} order books", order_books1.len(), tickers[0], order_books2.len(), tickers[1]);
 
-                        if let Some(pair_perf) = model.calibrate() {
-                            let perf_up = pair_perf.up;
-                            let perf_down = pair_perf.down;
-                            let actual_wins_up = if perf_up.actual_deals > 0 {
-                                perf_up.actual_wins as f64 * 100.0 / perf_up.actual_deals as f64
-                            } else { 0.0 };
-                            let actual_wins_down = if perf_down.actual_deals > 0 {
-                                perf_down.actual_wins as f64 * 100.0 / perf_down.actual_deals as f64
-                            } else { 0.0 };
-                            if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("signal_performance.csv") {
-                                let _ = writeln!(
-                                    file, "{},{},{:.1},{:.1},{:.1}%,{},{:.1},{:.1},{:.1}%",
-                                    pair_perf.created_on,
-                                    perf_up.training_deals,
-                                    perf_up.training_total_pnl,
-                                    perf_up.actual_total_pnl,
-                                    actual_wins_up,
-                                    perf_down.training_deals,
-                                    perf_down.training_total_pnl,
-                                    perf_down.actual_total_pnl,
-                                    actual_wins_down,
-                                );
-                            }
-                        }
+                let events = merge_events(inst1_id, inst2_id, &order_books1, &order_books2);
 
-                        let trade_signal = model.process(event);
+                let mut prev_hour = events[0].order_book.timestamp.hour();
+                let (mut last_ob1, mut last_ob2) = (None, None);
+                for (i, event) in events.iter().enumerate() {
+                    if event.order_book.timestamp.hour() != prev_hour {
+                        prev_hour = event.order_book.timestamp.hour();
+                        info!("Hour {prev_hour}");
+                    }
 
-                        if event.instrument_id == inst1_id {
-                            last_ob1 = Some(event.order_book.clone());
-                        } else {
-                            last_ob2 = Some(event.order_book.clone());
-                        }
+                    if let Some(pair_perf) = model.calibrate() {
+                        /*let perf_up = pair_perf.up;
+                        let perf_down = pair_perf.down;
+                        let actual_wins_up = if perf_up.actual_deals > 0 {
+                            perf_up.actual_wins as f64 * 100.0 / perf_up.actual_deals as f64
+                        } else { 0.0 };
+                        let actual_wins_down = if perf_down.actual_deals > 0 {
+                            perf_down.actual_wins as f64 * 100.0 / perf_down.actual_deals as f64
+                        } else { 0.0 };
+                        if let Ok(mut file) = OpenOptions::new().append(true).create(true).open("signal_performance.csv") {
+                            let _ = writeln!(
+                                file, "{},{},{:.1},{:.1},{:.1}%,{},{:.1},{:.1},{:.1}%",
+                                pair_perf.created_on,
+                                perf_up.training_deals,
+                                perf_up.training_total_pnl,
+                                perf_up.actual_total_pnl,
+                                actual_wins_up,
+                                perf_down.training_deals,
+                                perf_down.training_total_pnl,
+                                perf_down.actual_total_pnl,
+                                actual_wins_down,
+                            );
+                        }*/
+                    }
 
-                        if let Some(ob1) = &last_ob1 && let Some(ob2) = &last_ob2 {
-                            if let Some(deal) = active_deal.as_mut() {
-                                if ob1.timestamp > deal.close_time {
-                                    if let Some((hob1, _)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
-                                        deal.close1(hob1);
-                                    } else {
-                                        deal.close1(ob1);
-                                    }
-                                }
-                                if ob2.timestamp > deal.close_time {
-                                    if let Some((_, hob2)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
-                                        deal.close2(hob2);
-                                    } else {
-                                        deal.close2(ob2);
-                                    }
-                                }
+                    let trade_signal = model.process(event);
 
-                                if deal.close_price1.is_some() && deal.close_price2.is_some() {
-                                    let (revenue, cost) = deal.close();
-                                    let commission = Decimal::from(5);
-                                    model.inform_deal_result(deal.signal, (revenue - cost - commission).as_f64());
-                                    total_income += revenue;
-                                    daily_income += revenue;
-                                    total_outcome += cost;
-                                    daily_outcome += cost;
-                                    total_commission += commission;
-                                    daily_commission += commission;
-                                    daily_deals += 1;
-                                    active_deal = None;
-                                }
-                            } else if matches!(trade_signal, TradeSignal::Buy1Sell2(_) | TradeSignal::Sell1Buy2(_)) {
-                                if let Some((hob1, hob2)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
-                                    active_deal = TestDeal::open(trade_signal, hob1, hob2);
+                    if event.instrument_id == inst1_id {
+                        last_ob1 = Some(event.order_book.clone());
+                    } else {
+                        last_ob2 = Some(event.order_book.clone());
+                    }
+
+                    if let Some(ob1) = &last_ob1 && let Some(ob2) = &last_ob2 {
+                        if let Some(deal) = active_deal.as_mut() {
+                            if ob1.timestamp > deal.close_time {
+                                if let Some((hob1, _)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
+                                    deal.close1(hob1);
                                 } else {
-                                    active_deal = TestDeal::open(trade_signal, ob1, ob2);
+                                    deal.close1(ob1);
                                 }
+                            }
+                            if ob2.timestamp > deal.close_time {
+                                if let Some((_, hob2)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
+                                    deal.close2(hob2);
+                                } else {
+                                    deal.close2(ob2);
+                                }
+                            }
+
+                            if deal.close_price1.is_some() && deal.close_price2.is_some() {
+                                let (revenue, cost) = deal.close();
+                                let commission = (revenue + cost) * Decimal::from_f64(0.015 / 100.0).unwrap();// Decimal::from(5);
+                                model.inform_deal_result(deal.signal, (revenue - cost - commission).as_f64());
+                                total_income += revenue;
+                                daily_income += revenue;
+                                total_outcome += cost;
+                                daily_outcome += cost;
+                                total_commission += commission;
+                                daily_commission += commission;
+                                daily_deals += 1;
+                                active_deal = None;
+                            }
+                        } else if matches!(trade_signal, TradeSignal::Buy1Sell2(_) | TradeSignal::Sell1Buy2(_)) {
+                            if let Some((hob1, hob2)) = on_horizon(&events, i, inst1_id, SLIPPERING_MS) {
+                                active_deal = TestDeal::open(trade_signal, hob1, hob2);
+                            } else {
+                                active_deal = TestDeal::open(trade_signal, ob1, ob2);
                             }
                         }
                     }
-
-                    info!("Day {} net {} on {} deals with commission {}", diapason.from.date_naive(), daily_income - daily_outcome - daily_commission, daily_deals, daily_commission);
                 }
 
-                diapason.from += TimeDelta::days(1);
-                diapason.to += TimeDelta::days(1);
+                info!("Day {} net {} on {} deals with commission {}", diapason.from.date_naive(), daily_income - daily_outcome - daily_commission, daily_deals, daily_commission);
             }
-            info!("Net profit {}", total_income - total_outcome - total_commission);
+
+            diapason.from += TimeDelta::days(1);
+            diapason.to += TimeDelta::days(1);
+        }
+        info!("Net profit {}", total_income - total_outcome - total_commission);
     }
     Ok(())
 }
@@ -280,7 +332,7 @@ impl TestContext {
 }
 
 #[tokio::main]
-async fn _main() -> EmptyResult {
+async fn __main() -> EmptyResult {
     dotenv::dotenv().ok();
     SimpleLogger::init(LevelFilter::Info, simplelog::Config::default()).ok();
     let db_url = std::env::var("DB_URL").expect("DB_URL is not set");
@@ -540,4 +592,44 @@ async fn get_order_books(tickers: &[&str], ids: &[i16], diapason: TimeDiapason, 
         order_book_cache::write(tickers[1], diapason, &order_books2, true)?;
         Ok((order_books1, order_books2))
     }
+}
+
+fn downsample_order_books(origin: Vec<OrderBook>, up_diapason: i64) -> Vec<OrderBook> {
+    let mut result = Vec::new();
+
+    let mut prev_time = 0;
+    let mut delta = 0;
+    for ob in origin {
+        let ms = ob.timestamp.timestamp_millis();
+        if ms > prev_time + delta {
+            result.push(ob);
+            prev_time = ms;
+            delta = 0;
+            for i in 0..512 {
+                if rand::random_bool(0.85) {
+                    delta += rand::random_range(150..=250);
+                } else {
+                    delta += rand::random_range(250..=up_diapason);
+                }
+            }
+            delta /= 512 + 256;
+        }
+    }
+
+    let mut deltas = result.windows(2)
+        .map(|obs| {
+            if obs.len() > 1 {
+                obs[1].timestamp.timestamp_millis() - obs[0].timestamp.timestamp_millis()
+            } else {
+                0
+            }
+        })
+        .collect::<Vec<_>>();
+    deltas.sort();
+    let p50 = deltas[deltas.len() / 2];
+    let p90 = deltas[deltas.len() * 9 / 10];
+    let p99 = deltas[deltas.len() * 99 / 100];
+    info!("p50: {}, p90: {}, p99: {}", p50, p90, p99);
+
+    result
 }
