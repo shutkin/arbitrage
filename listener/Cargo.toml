@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 model = { path = "../model" }
 db = { path = "../db" }
+alor = { path = "../alor" }
 bybit = { path = "../bybit" }
 tinvest = { path = "../tinvest" }
 tokio = { version = "1.48", features = ["full"] }
